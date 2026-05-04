@@ -32,7 +32,7 @@ FOMC_MEETINGS.forEach(f=>{ FOMC_BY_DATE[f.date]=f; });
 const STATE = {
   sliderIdx:    DATES_2025_ON.length - 1,
   stepMode:     'day',
-  activeTab:    'masterView',
+  activeTab:    'meetingPremium',
   refDate:      '2025-01-02',
   cutsHikeHalf: 'full',
   evFilter:     'all',
@@ -1322,18 +1322,17 @@ function populateTbSelects() {
 // ─── 14. RENDER ACTIVE TAB ───────────────────────────────────
 function renderTab() {
   const tab = STATE.activeTab;
-  if      (tab==='masterView')     renderMasterTab();
-  else if (tab==='meetingPremium') renderMPTab();
-  else if (tab==='sr3Curve')       renderSR3Tab();
-  else if (tab==='zqCurve')        renderZQTab();
-  else if (tab==='neutralRate')    renderNRTab();
-  else if (tab==='meetingDiff')    renderDiffTab();
-  else if (tab==='events')         renderEventsTab();
-  else if (tab==='tradeBlotter')    renderTradeBlotter();
-  else {
-    // Blotter P&L in KPI bar needs refresh even on other tabs
-    if (STATE.trades.length) updateKPIBar();
-  }
+  // Only Meeting Premiums tab remains; other render functions
+  // are kept but only called if their tab somehow becomes active
+  if      (tab==='meetingPremium') renderMPTab();
+  else if (tab==='masterView'  && typeof renderMasterTab==='function')  renderMasterTab();
+  else if (tab==='sr3Curve'    && typeof renderSR3Tab==='function')     renderSR3Tab();
+  else if (tab==='zqCurve'     && typeof renderZQTab==='function')      renderZQTab();
+  else if (tab==='neutralRate' && typeof renderNRTab==='function')       renderNRTab();
+  else if (tab==='meetingDiff' && typeof renderDiffTab==='function')     renderDiffTab();
+  else if (tab==='events'      && typeof renderEventsTab==='function')   renderEventsTab();
+  else if (tab==='tradeBlotter'&& typeof renderTradeBlotter==='function')renderTradeBlotter();
+  else { renderMPTab(); }  // fallback
   updateKPIBar();
 }
 
@@ -1437,32 +1436,42 @@ function bind(){
   };
 
   // Cuts/Hikes half toggle
+  // Cuts/Hikes half toggle (guarded — element may not exist)
   ['chHalfFull','chHalfH1','chHalfH2'].forEach(id=>{
-    document.getElementById(id).onclick=()=>{
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.onclick=()=>{
       STATE.cutsHikeHalf=id.replace('chHalf','').toLowerCase();
-      ['chHalfFull','chHalfH1','chHalfH2'].forEach(x=>
-        document.getElementById(x).classList.toggle('active-toggle',x===id));
-      renderNRTab();
+      ['chHalfFull','chHalfH1','chHalfH2'].forEach(x=>{
+        const e2 = document.getElementById(x);
+        if (e2) e2.classList.toggle('active-toggle',x===id);
+      });
+      if (typeof renderNRTab === 'function') renderNRTab();
     };
   });
 
-  // Events filter
+  // Events filter (guarded — elements may not exist)
   ['evAll','evFOMC','evKeyData','evHawkish','evDovish'].forEach(id=>{
-    document.getElementById(id).onclick=()=>{
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.onclick=()=>{
       document.querySelectorAll('#tab-events .mini-btn').forEach(b=>b.classList.remove('active-toggle'));
       document.getElementById(id).classList.add('active-toggle');
       STATE.evFilter=id.replace('ev','').toLowerCase();
-      renderEventsTab();
+      if (typeof renderEventsTab === 'function') renderEventsTab();
     };
   });
-  document.getElementById('evFilter').onclick=()=>{
-    STATE.evFrom=document.getElementById('evFrom').value;
-    STATE.evTo=document.getElementById('evTo').value;
-    renderEventsTab();
-  };
+  const evFilterBtn = document.getElementById('evFilter');
+  if (evFilterBtn) {
+    evFilterBtn.onclick=()=>{
+      STATE.evFrom=document.getElementById('evFrom').value;
+      STATE.evTo=document.getElementById('evTo').value;
+      if (typeof renderEventsTab === 'function') renderEventsTab();
+    };
+  }
 
 
-  // ── Trade Blotter bindings ─────────────────────────────────
+  // ── Trade Blotter bindings (guarded — elements may not exist) ──
   const tbTypeEl = document.getElementById('tbType');
   const tbLeg1El = document.getElementById('tbLeg1');
   const tbLeg2El = document.getElementById('tbLeg2');
@@ -1472,84 +1481,48 @@ function bind(){
     if(tbLeg1El) tbLeg1El.onchange = updateTbPreview;
     if(tbLeg2El) tbLeg2El.onchange = updateTbPreview;
 
-    document.getElementById('tbBuy').onclick = () => {
+    const tbBuyEl = document.getElementById('tbBuy');
+    const tbSellEl = document.getElementById('tbSell');
+    if (tbBuyEl) tbBuyEl.onclick = () => {
       STATE.tbSide = 'buy';
-      document.getElementById('tbBuy').classList.add('active');
-      document.getElementById('tbSell').classList.remove('active');
+      tbBuyEl.classList.add('active');
+      if (tbSellEl) tbSellEl.classList.remove('active');
     };
-    document.getElementById('tbSell').onclick = () => {
+    if (tbSellEl) tbSellEl.onclick = () => {
       STATE.tbSide = 'sell';
-      document.getElementById('tbSell').classList.add('active');
-      document.getElementById('tbBuy').classList.remove('active');
+      tbSellEl.classList.add('active');
+      if (tbBuyEl) tbBuyEl.classList.remove('active');
     };
 
-    document.getElementById('tbAddTrade').onclick = () => {
-      if (STATE.trades.length>=40){ alert('Max 40 trades. Remove some first.'); return; }
-      const d=currentDate(), type=tbTypeEl.value;
-      const v1=tbLeg1El.value, v2=tbLeg2El.value;
-      if (!v1) return;
-      const tmp={type};
-      if (type==='meeting_prem')   tmp.mDate1=v1;
-      if (type==='meeting_spread') { tmp.mDate1=v1; tmp.mDate2=v2; }
-      if (type==='sr3_outright')   tmp.contract1=v1;
-      if (type==='sr3_spread')     { tmp.contract1=v1; tmp.contract2=v2; }
-      const entryPrice=getTradeCurrentPrice(tmp,d);
-      if (entryPrice==null){
-        const h=document.getElementById('tbBuilderHint');
-        h.textContent='⚠ No price data on '+d+' — move slider to a date with data.';
-        h.style.color='#ef4444';
-        setTimeout(()=>{h.style.color='';updateTbPreview();},2500);
-        return;
-      }
-      const lots=Math.max(1,Math.min(1000,parseInt(document.getElementById('tbSize').value)||1));
-      const trade={id:STATE.tradeNextId++,type,side:STATE.tbSide,lots,
-                   entryDate:d,entryPrice,label:buildTradeLabel(type,v1,v2),dv01:getDV01(type)};
-      if (type==='meeting_prem')   trade.mDate1=v1;
-      if (type==='meeting_spread') { trade.mDate1=v1; trade.mDate2=v2; }
-      if (type==='sr3_outright')   trade.contract1=v1;
-      if (type==='sr3_spread')     { trade.contract1=v1; trade.contract2=v2; }
-      STATE.trades.push(trade);
-      if (STATE.activeTab==='tradeBlotter') renderTradeBlotter();
-      updateKPIBar();
-    };  document.getElementById('tbAddTrade').onclick = () => {
-      if (STATE.trades.length >= 40) {
-        alert('Maximum 40 trades reached. Remove some trades first.');
-        return;
-      }
-      const d    = currentDate();
-      const type = tbTypeEl.value;
+    const tbAddEl = document.getElementById('tbAddTrade');
+    if (tbAddEl) tbAddEl.onclick = () => {
+      if (STATE.trades.length >= 40) { alert('Max 40 trades.'); return; }
+      const d = currentDate(), type = tbTypeEl.value;
       const leg1 = parseInt(tbLeg1El.value);
       const leg2 = parseInt(tbLeg2El.value);
       if (isNaN(leg1)) return;
       const entryPrice = getTradePrice(type, leg1, isNaN(leg2) ? 0 : leg2, d);
       if (entryPrice == null) {
-        document.getElementById('tbBuilderHint').textContent = '⚠ No price data for this instrument on the selected date.';
-        document.getElementById('tbBuilderHint').style.color = '#ef4444';
-        setTimeout(() => {
-          document.getElementById('tbBuilderHint').style.color = '';
-          updateTbPreview();
-        }, 2000);
+        const h = document.getElementById('tbBuilderHint');
+        if (h) { h.textContent='No price data'; h.style.color='#ef4444'; setTimeout(()=>{h.style.color='';},2000); }
         return;
       }
       const lots = Math.max(1, Math.min(1000, parseInt(document.getElementById('tbSize').value) || 1));
       STATE.trades.push({
-        id:         STATE.tradeNextId++,
-        type, leg1, leg2: isNaN(leg2) ? 0 : leg2,
-        side:       STATE.tbSide,
-        lots,
-        entryDate:  d,
-        entryPrice,
-        label:      buildTradeLabel(type, leg1, isNaN(leg2) ? 0 : leg2, d),
-        dv01:       getDV01(type),
+        id: STATE.tradeNextId++, type, leg1, leg2: isNaN(leg2)?0:leg2,
+        side: STATE.tbSide, lots, entryDate: d, entryPrice,
+        label: buildTradeLabel(type, leg1, isNaN(leg2)?0:leg2, d),
+        dv01: getDV01(type),
       });
-      if (STATE.activeTab === 'tradeBlotter') renderTradeBlotter();
+      if (STATE.activeTab==='tradeBlotter' && typeof renderTradeBlotter==='function') renderTradeBlotter();
       updateKPIBar();
     };
 
-    document.getElementById('tbClearAll').onclick = () => {
+    const tbClearEl = document.getElementById('tbClearAll');
+    if (tbClearEl) tbClearEl.onclick = () => {
       if (STATE.trades.length && confirm('Clear all open trades?')) {
         STATE.trades = [];
-        if (STATE.activeTab === 'tradeBlotter') renderTradeBlotter();
+        if (STATE.activeTab==='tradeBlotter' && typeof renderTradeBlotter==='function') renderTradeBlotter();
         updateKPIBar();
       }
     };

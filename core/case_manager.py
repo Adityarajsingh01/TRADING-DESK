@@ -277,19 +277,28 @@ class CaseManager:
             raw_cases = data.get("cases", [])
             self.cases = []
             for c in raw_cases:
-                # Deserialise meeting_cuts date keys (kept for analytics display)
-                c["meeting_cuts"] = {
-                    _str_date(k): v
-                    for k, v in c.get("meeting_cuts", {}).items()
-                }
-                # ALWAYS rebuild rate_path from year_configs using today's logic.
-                # This ensures old saved cases get the corrected pricing (future-only
-                # cut distribution) without needing to re-save them.
-                sofr_path, effr_path, meeting_cuts = build_rate_path(
-                    c["base_sofr"], c["base_effr"], c.get("year_configs", {})
-                )
-                c["rate_path"] = {"sofr": sofr_path, "effr": effr_path}
-                c["meeting_cuts"] = meeting_cuts
+                # Fast path: trust saved rate_path / meeting_cuts. Rebuilding
+                # build_rate_path for every case on load made startup ~25 s
+                # for 5,000 cases. We only rebuild when the saved data is
+                # missing (legacy cases or external edits).
+                saved_sofr = c.get("rate_path", {}).get("sofr") or {}
+                saved_effr = c.get("rate_path", {}).get("effr") or {}
+                saved_cuts = c.get("meeting_cuts") or {}
+
+                if saved_sofr or saved_effr or saved_cuts:
+                    c["rate_path"] = {
+                        "sofr": _deserialise_path(saved_sofr),
+                        "effr": _deserialise_path(saved_effr),
+                    }
+                    c["meeting_cuts"] = {
+                        _str_date(k): v for k, v in saved_cuts.items()
+                    }
+                else:
+                    sofr_path, effr_path, meeting_cuts = build_rate_path(
+                        c["base_sofr"], c["base_effr"], c.get("year_configs", {})
+                    )
+                    c["rate_path"] = {"sofr": sofr_path, "effr": effr_path}
+                    c["meeting_cuts"] = meeting_cuts
                 self.cases.append(c)
             # Load custom formulas if any
             custom = data.get("custom_formulas", [])
@@ -358,6 +367,55 @@ class CaseManager:
         self.cases.append(case)
         self._save()
         return case
+
+    def bulk_add_cases(self, specs: List[dict]) -> int:
+        """
+        Append many cases in a single batch (one disk write).
+
+        specs: list of dicts with keys: name, base_effr, base_sofr, year_configs.
+        Names that collide with existing cases are auto-suffixed with " (n)".
+        Returns the number of cases added.
+        """
+        # Seed the id counter from existing cases so we never reuse ids.
+        next_num = 0
+        for c in self.cases:
+            try:
+                next_num = max(next_num, int(c["id"].split("_")[1]))
+            except (IndexError, ValueError):
+                pass
+
+        existing_names = {c["name"] for c in self.cases}
+        added = 0
+
+        for spec in specs:
+            # Avoid name collisions without dropping cases.
+            name = spec["name"]
+            if name in existing_names:
+                k = 2
+                while f"{name} ({k})" in existing_names:
+                    k += 1
+                name = f"{name} ({k})"
+            existing_names.add(name)
+
+            next_num += 1
+            sofr_path, effr_path, meeting_cuts = build_rate_path(
+                spec["base_sofr"], spec["base_effr"], spec["year_configs"]
+            )
+            self.cases.append({
+                "id":           f"case_{next_num:04d}",
+                "name":         name,
+                "created_at":   datetime.now().isoformat(timespec="seconds"),
+                "base_effr":    spec["base_effr"],
+                "base_sofr":    spec["base_sofr"],
+                "year_configs": spec["year_configs"],
+                "rate_path":    {"sofr": sofr_path, "effr": effr_path},
+                "meeting_cuts": meeting_cuts,
+            })
+            added += 1
+
+        if added:
+            self._save()
+        return added
 
     def delete_case(self, case_id: str):
         self.cases = [c for c in self.cases if c["id"] != case_id]

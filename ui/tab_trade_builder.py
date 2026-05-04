@@ -16,6 +16,35 @@ from core.trade_engine import (
     dv01_per_lot, STRUCTURE_WEIGHTS, structure_leg_count, structure_total_lots,
 )
 
+# ── Structure definitions (same as Structures Live in Case Analyzer) ──────────
+_ZQ_FLIES = [
+    ("ZQ Jul26 Aug26 Oct26 Fly", ["ZQN26","ZQQ26","ZQV26"]),
+    ("ZQ Aug26 Oct26 Nov26 Fly", ["ZQQ26","ZQV26","ZQX26"]),
+    ("ZQ Oct26 Nov26 Jan27 Fly", ["ZQV26","ZQX26","ZQF27"]),
+    ("ZQ Nov26 Jan27 Feb27 Fly", ["ZQX26","ZQF27","ZQG27"]),
+    ("ZQ Jan27 Feb27 Apr27 Fly", ["ZQF27","ZQG27","ZQJ27"]),
+    ("ZQ Feb27 Apr27 May27 Fly", ["ZQG27","ZQJ27","ZQK27"]),
+    ("ZQ Apr27 May27 Jul27 Fly", ["ZQJ27","ZQK27","ZQN27"]),
+]
+
+_SR3_SPDS = [
+    ("SR3 Mar26-Jun26", ["SR3H26","SR3M26"]),
+    ("SR3 Jun26-Sep26", ["SR3M26","SR3U26"]),
+    ("SR3 Sep26-Dec26", ["SR3U26","SR3Z26"]),
+    ("SR3 Dec26-Mar27", ["SR3Z26","SR3H27"]),
+    ("SR3 Mar27-Jun27", ["SR3H27","SR3M27"]),
+    ("SR3 Jun27-Sep27", ["SR3M27","SR3U27"]),
+    ("SR3 Sep27-Dec27", ["SR3U27","SR3Z27"]),
+    ("SR3 Dec27-Mar28", ["SR3Z27","SR3H28"]),
+    ("SR3 Mar28-Jun28", ["SR3H28","SR3M28"]),
+    ("SR3 Jun28-Sep28", ["SR3M28","SR3U28"]),
+    ("SR3 Sep28-Dec28", ["SR3U28","SR3Z28"]),
+    ("SR3 Dec28-Mar29", ["SR3Z28","SR3H29"]),
+    ("SR3 Mar29-Jun29", ["SR3H29","SR3M29"]),
+    ("SR3 Jun29-Sep29", ["SR3M29","SR3U29"]),
+    ("SR3 Sep29-Dec29", ["SR3U29","SR3Z29"]),
+]
+
 TRADE_TYPES = ["Outright", "Spread", "Butterfly (Fly)", "Condor", "Defly"]
 
 def _contract_codes(contracts: list) -> List[str]:
@@ -123,7 +152,234 @@ def _live_price_for_trade(t, catalog):
     inst = catalog.get(t.instrument_key) or catalog.get(f"CDR:{t.instrument_key}") or catalog.get(f"DFL:{t.instrument_key}")
     if inst:
         return _live_price_for_instrument(inst)
+    # Fallback: compute directly from bare leg codes (Structures Live trades)
+    from core.live_data import get_live_price
+    prices = [get_live_price(l, t.product) for l in t.legs]
+    if any(p is None for p in prices):
+        return None
+    if t.trade_type == "Outright":
+        return prices[0]
+    elif t.trade_type == "Spread":
+        return round(prices[1] - prices[0], 4)  # back - front
+    elif t.trade_type == "Butterfly (Fly)":
+        return round(prices[0] - 2*prices[1] + prices[2], 4)
+    elif t.trade_type == "Condor":
+        return round(prices[0] - prices[1] - prices[2] + prices[3], 4)
+    elif t.trade_type == "Defly":
+        return round(prices[0] - 3*prices[1] + 3*prices[2] - prices[3], 4)
     return None
+
+
+# ── Structures Live helpers ───────────────────────────────────────────────────
+
+def _sl_get_price(bare_code, zqc, sr3c):
+    """Get outright mid for a bare code like ZQN26 or SR3M26."""
+    from core.live_data import get_live_price
+    # Build code_map on first call
+    code_map = {}
+    for c in zqc + sr3c:
+        b = c['code'].split(' (')[0] if ' (' in c['code'] else c['code']
+        code_map[b] = c['code']
+    suffixed = code_map.get(bare_code, bare_code)
+    return get_live_price(suffixed)
+
+def _sl_live_fly(legs, zqc, sr3c):
+    p = [_sl_get_price(l, zqc, sr3c) for l in legs]
+    if all(x is not None for x in p):
+        return (p[0] - 2*p[1] + p[2]) * 100
+    return None
+
+def _sl_live_spread(legs, zqc, sr3c):
+    p = [_sl_get_price(l, zqc, sr3c) for l in legs]
+    if all(x is not None for x in p):
+        return (p[0] - p[1]) * 100
+    return None
+
+def _sl_cv(v):
+    if v is None: return "<span style='color:#555;'>—</span>"
+    c = "#00FF41" if v > 0.01 else "#FF3131" if v < -0.01 else "#C0C0C0"
+    return f"<span style='color:{c};font-weight:bold;'>{v:+.3f}</span>"
+
+def _sl_case_zq_fly(case, legs):
+    from core.pricing_engine import price_zq
+    C2M = {'F':1,'G':2,'H':3,'J':4,'K':5,'M':6,'N':7,'Q':8,'U':9,'V':10,'X':11,'Z':12}
+    path = case.get('rate_path', {}).get('effr', {})
+    base = case.get('base_effr', 3.64)
+    prices = []
+    for l in legs:
+        suffix = l[2:]  # e.g. "N26"
+        yr = 2000 + int(suffix[1:])
+        mo = C2M[suffix[0]]
+        prices.append(price_zq(yr, mo, path, base))
+    return (prices[0] - 2*prices[1] + prices[2]) * 100
+
+def _sl_case_sr3_spread(case, legs, sr3c):
+    from core.pricing_engine import price_sr3
+    path = case.get('rate_path', {}).get('sofr', {})
+    base = case.get('base_sofr', 3.64)
+    sr3_map = {}
+    for c in sr3c:
+        bare = c['code'].split(' (')[0] if ' (' in c['code'] else c['code']
+        sr3_map[bare] = c
+    prices = []
+    for l in legs:
+        cinfo = sr3_map.get(l)
+        if cinfo is None: return None
+        prices.append(price_sr3(cinfo['ref_start'], cinfo['ref_end'], path, base))
+    return (prices[0] - prices[1]) * 100
+
+
+def _render_structures_live_panel(cm, blotter, zqc, sr3c):
+    """Render ZQ flies + SR3 spreads with live values, case projections, and quick-trade buttons."""
+    bb_section("STRUCTURES LIVE — QUICK TRADE")
+    case_names = [c['name'][:15] for c in cm.cases]
+
+    col1, col2 = st.columns(2)
+
+    # ── ZQ Butterflies ────────────────────────────────────────────────────
+    with col1:
+        bb_subsection("ZQ MEETING BUTTERFLIES")
+        hdr = "<tr><th style='text-align:left;white-space:nowrap;min-width:180px;'>Structure</th>"
+        hdr += "<th style='white-space:nowrap;min-width:70px;color:#00B4D8;'>LIVE</th>"
+        for cn in case_names:
+            hdr += f"<th style='white-space:nowrap;min-width:70px;color:#a78bfa;'>{cn}</th>"
+        hdr += "</tr>"
+        rows = ""
+        fly_names, fly_vals = [], []
+        for i, (name, legs) in enumerate(_ZQ_FLIES):
+            val = _sl_live_fly(legs, zqc, sr3c)
+            fly_names.append(name.replace("ZQ ","").replace(" Fly",""))
+            fly_vals.append(val if val is not None else 0)
+            rows += f"<tr><td class='bb-row-label' style='white-space:nowrap;'>{name}</td>"
+            rows += f"<td style='text-align:center;white-space:nowrap;'>{_sl_cv(val)}</td>"
+            for case in cm.cases:
+                cv = _sl_case_zq_fly(case, legs)
+                rows += f"<td style='text-align:center;white-space:nowrap;'>{_sl_cv(cv)}</td>"
+            rows += "</tr>"
+        st.markdown(
+            f"<div class='bb-table-wrap'>"
+            f"<table class='bb-table'>"
+            f"<thead>{hdr}</thead><tbody>{rows}</tbody></table></div>",
+            unsafe_allow_html=True)
+
+        # Quick-trade buttons for ZQ flies
+        fly_sel = st.selectbox("Select ZQ Fly to trade", [n for n, _ in _ZQ_FLIES], key="tb_sl_zq_sel")
+        qc1, qc2 = st.columns(2)
+        with qc1:
+            if st.button("BUY this Fly", key="tb_sl_zq_buy", type="primary"):
+                _quick_trade_fly(fly_sel, "BUY", blotter, zqc, sr3c)
+                st.rerun()
+        with qc2:
+            if st.button("SELL this Fly", key="tb_sl_zq_sell"):
+                _quick_trade_fly(fly_sel, "SELL", blotter, zqc, sr3c)
+                st.rerun()
+
+        # Bar chart
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=fly_names, y=fly_vals,
+            marker_color=["#00FF41" if v>=0 else "#FF3131" for v in fly_vals],
+            text=[f"{v:+.2f}" for v in fly_vals], textposition="outside",
+            textfont=dict(size=9, color="#C0C0C0")))
+        fig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)", height=250, showlegend=False,
+            margin=dict(l=40,r=10,t=10,b=60), xaxis=dict(tickangle=-30, tickfont=dict(size=8)),
+            yaxis=dict(title="bps", tickformat=".2f", zeroline=True, zerolinecolor="#444"))
+        fig.add_hline(y=0, line_color="#444", line_width=1, line_dash="dot")
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+    # ── SR3 Calendar Spreads ──────────────────────────────────────────────
+    with col2:
+        bb_subsection("SR3 CALENDAR SPREADS (1Q)")
+        hdr2 = "<tr><th style='text-align:left;white-space:nowrap;min-width:180px;'>Structure</th>"
+        hdr2 += "<th style='white-space:nowrap;min-width:70px;color:#00B4D8;'>LIVE</th>"
+        for cn in case_names:
+            hdr2 += f"<th style='white-space:nowrap;min-width:70px;color:#a78bfa;'>{cn}</th>"
+        hdr2 += "</tr>"
+        rows2 = ""
+        spd_names, spd_vals = [], []
+        for name, legs in _SR3_SPDS:
+            val = _sl_live_spread(legs, zqc, sr3c)
+            spd_names.append(name.replace("SR3 ",""))
+            spd_vals.append(val if val is not None else 0)
+            rows2 += f"<tr><td class='bb-row-label' style='white-space:nowrap;'>{name}</td>"
+            rows2 += f"<td style='text-align:center;white-space:nowrap;'>{_sl_cv(val)}</td>"
+            for case in cm.cases:
+                cv = _sl_case_sr3_spread(case, legs, sr3c)
+                rows2 += f"<td style='text-align:center;white-space:nowrap;'>{_sl_cv(cv)}</td>"
+            rows2 += "</tr>"
+        st.markdown(
+            f"<div class='bb-table-wrap'>"
+            f"<table class='bb-table'>"
+            f"<thead>{hdr2}</thead><tbody>{rows2}</tbody></table></div>",
+            unsafe_allow_html=True)
+
+        # Quick-trade buttons for SR3 spreads
+        spd_sel = st.selectbox("Select SR3 Spread to trade", [n for n, _ in _SR3_SPDS], key="tb_sl_sr3_sel")
+        qc3, qc4 = st.columns(2)
+        with qc3:
+            if st.button("BUY this Spread", key="tb_sl_sr3_buy", type="primary"):
+                _quick_trade_spread(spd_sel, "BUY", blotter, zqc, sr3c)
+                st.rerun()
+        with qc4:
+            if st.button("SELL this Spread", key="tb_sl_sr3_sell"):
+                _quick_trade_spread(spd_sel, "SELL", blotter, zqc, sr3c)
+                st.rerun()
+
+        # Bar chart
+        fig2 = go.Figure()
+        fig2.add_trace(go.Bar(x=spd_names, y=spd_vals,
+            marker_color=["#00FF41" if v>=0 else "#FF3131" for v in spd_vals],
+            text=[f"{v:+.2f}" for v in spd_vals], textposition="outside",
+            textfont=dict(size=8, color="#C0C0C0")))
+        fig2.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)", height=250, showlegend=False,
+            margin=dict(l=40,r=10,t=10,b=60), xaxis=dict(tickangle=-30, tickfont=dict(size=7)),
+            yaxis=dict(title="bps", tickformat=".2f", zeroline=True, zerolinecolor="#444"))
+        fig2.add_hline(y=0, line_color="#444", line_width=1, line_dash="dot")
+        st.plotly_chart(fig2, use_container_width=True, config={"displayModeBar": False})
+
+    st.markdown("<hr style='border-color:#1a3050;margin:20px 0;'>", unsafe_allow_html=True)
+
+
+def _quick_trade_fly(name, side, blotter, zqc, sr3c):
+    """Add a ZQ fly trade to the blotter at live mid."""
+    legs = next((l for n, l in _ZQ_FLIES if n == name), None)
+    if not legs: return
+    key = "/".join(legs)
+    live_val = _sl_live_fly(legs, zqc, sr3c)
+    # Entry in price points (same unit as get_live_struct_price)
+    entry_px = round(live_val / 100, 4) if live_val is not None else 0.0
+    trade = Trade(
+        product="ZQ", trade_type="Butterfly (Fly)",
+        legs=legs, instrument_key=key,
+        display_name=f"[FLY] {name}",
+        side=side, lots=1, entry_price=entry_px,
+        entry_source="Structures Live",
+    )
+    blotter.add_trade(trade)
+    bps_str = f"{live_val:+.3f} bps" if live_val is not None else "---"
+    st.success(f"Added {side} 1x {name} @ {bps_str}")
+
+
+def _quick_trade_spread(name, side, blotter, zqc, sr3c):
+    """Add an SR3 spread trade to the blotter at live mid."""
+    legs = next((l for n, l in _SR3_SPDS if n == name), None)
+    if not legs: return
+    key = f"{legs[1]}-{legs[0]}"  # back-front convention
+    live_val = _sl_live_spread(legs, zqc, sr3c)  # front-back in bps
+    # Convert to back-front price points (blotter convention: back - front)
+    entry_px = round(-live_val / 100, 4) if live_val is not None else 0.0
+    trade = Trade(
+        product="SR3", trade_type="Spread",
+        legs=legs, instrument_key=key,
+        display_name=f"[SPD 1Q] {name}",
+        side=side, lots=1, entry_price=entry_px,
+        entry_source="Structures Live",
+    )
+    blotter.add_trade(trade)
+    bps_str = f"{live_val:+.3f} bps" if live_val is not None else "---"
+    st.success(f"Added {side} 1x {name} @ {bps_str}")
+
 
 # ---- MAIN RENDER ----
 def render_trade_builder_tab(cm, sr1c, zqc, sr3c):
@@ -131,6 +387,9 @@ def render_trade_builder_tab(cm, sr1c, zqc, sr3c):
     blotter = _get_blotter()
     catalog = _build_instrument_catalog(sr1c, zqc, sr3c)
     st.session_state["tb_catalog"] = catalog
+
+    # ── Structures Live panel at the top ──────────────────────────────────
+    _render_structures_live_panel(cm, blotter, zqc, sr3c)
 
     bb_section("NEW TRADE ENTRY")
     col_prod, col_type = st.columns([1, 1])
@@ -267,13 +526,21 @@ def _render_live_blotter(blotter, catalog, all_cases, sr1c, zqc, sr3c):
 
     for t in blotter.trades:
         live_px = _live_price_for_trade(t, catalog)
-        live_str = f"{live_px:.4f}" if live_px is not None else "---"
         pnl_val = t.pnl(live_px) if live_px is not None else None
         bps_chg = t.pnl_bps(live_px) if live_px is not None else None
         t_dv01 = t.dv01()
         if pnl_val is not None:
             total_live_pnl += pnl_val
         total_dv01_all += t_dv01
+
+        # Display entry & live in bps for structure trades, price points for outrights
+        is_struct = t.trade_type != "Outright"
+        if is_struct:
+            entry_disp = f"{t.entry_price * 100:+.3f}"
+            live_disp = f"{live_px * 100:+.3f}" if live_px is not None else "---"
+        else:
+            entry_disp = f"{t.entry_price:.4f}"
+            live_disp = f"{live_px:.4f}" if live_px is not None else "---"
 
         pnl_str = f"${pnl_val:,.2f}" if pnl_val is not None else "---"
         bps_str = f"{bps_chg:+.2f}" if bps_chg is not None else "---"
@@ -292,8 +559,8 @@ def _render_live_blotter(blotter, catalog, all_cases, sr1c, zqc, sr3c):
             <td style="color:#FFB347;">{t.lots}</td>
             <td style="color:#90caf9;">{t.product}</td>
             <td style="color:#C0C0C0;text-align:left;white-space:nowrap;">{dn}</td>
-            <td style="color:#FFB347;">{t.entry_price:.4f}</td>
-            <td style="color:#00FF41;font-weight:600;">{live_str}</td>
+            <td style="color:#FFB347;">{entry_disp}</td>
+            <td style="color:#00FF41;font-weight:600;">{live_disp}</td>
             <td style="color:{pc};font-weight:700;">{bps_str}</td>
             <td style="color:{pc};font-weight:700;">{pnl_str}</td>
         </tr>"""
@@ -304,7 +571,7 @@ def _render_live_blotter(blotter, catalog, all_cases, sr1c, zqc, sr3c):
     <table class="bb-table">
     <thead><tr>
         <th>ID</th><th>DATE</th><th>SIDE</th><th>LOTS</th><th>PROD</th>
-        <th>INSTRUMENT</th><th>ENTRY</th><th>LIVE</th><th>bps</th><th>PnL ($)</th>
+        <th>INSTRUMENT</th><th>ENTRY</th><th>LIVE</th><th>chg bps</th><th>PnL ($)</th>
     </tr></thead>
     <tbody>{rows_html}</tbody>
     </table>

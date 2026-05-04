@@ -31,3 +31,8 @@ env/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Local-only files
+*.lnk
+*.bat
+~$*

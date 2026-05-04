@@ -1,90 +1,56 @@
 {
   "trades": [
     {
-      "id": "94a18f69",
+      "id": "768d5752",
+      "product": "ZQ",
+      "trade_type": "Butterfly (Fly)",
+      "legs": [
+        "ZQV26",
+        "ZQX26",
+        "ZQF27"
+      ],
+      "instrument_key": "ZQV26/ZQX26/ZQF27",
+      "display_name": "[FLY] ZQ Oct26 Nov26 Jan27 Fly",
+      "side": "BUY",
+      "lots": 1,
+      "entry_price": -0.02,
+      "entry_source": "Structures Live",
+      "notes": "",
+      "created_at": "2026-04-30T12:26:49"
+    },
+    {
+      "id": "d95f583b",
+      "product": "ZQ",
+      "trade_type": "Butterfly (Fly)",
+      "legs": [
+        "ZQN26",
+        "ZQQ26",
+        "ZQV26"
+      ],
+      "instrument_key": "ZQN26/ZQQ26/ZQV26",
+      "display_name": "[FLY] ZQ Jul26 Aug26 Oct26 Fly",
+      "side": "BUY",
+      "lots": 1,
+      "entry_price": -0.005,
+      "entry_source": "Structures Live",
+      "notes": "",
+      "created_at": "2026-05-01T13:52:50"
+    },
+    {
+      "id": "02bea2c5",
       "product": "SR1",
       "trade_type": "Outright",
       "legs": [
-        "SR1M26 (Jun)"
+        "SR1N26 (Jul)"
       ],
-      "instrument_key": "SR1M26 (Jun)",
-      "display_name": "[OUT] SR1M26 (Jun)",
-      "side": "BUY",
-      "lots": 1,
-      "entry_price": 96.3475,
-      "entry_source": "Live Mid",
-      "notes": "",
-      "created_at": "2026-04-27T13:28:55"
-    },
-    {
-      "id": "388abe07",
-      "product": "SR1",
-      "trade_type": "Butterfly (Fly)",
-      "legs": [
-        "SR1Q26 (Aug)",
-        "SR1U26 (Sep)",
-        "SR1V26 (Oct)"
-      ],
-      "instrument_key": "SR1Q26 (Aug)/SR1U26 (Sep)/SR1V26 (Oct)",
-      "display_name": "[FLY 1M] SR1Q26 (Aug)/SR1U26 (Sep)/SR1V26 (Oct)",
-      "side": "BUY",
-      "lots": 1,
-      "entry_price": 0.0125,
-      "entry_source": "Live Mid",
-      "notes": "",
-      "created_at": "2026-04-27T13:29:38"
-    },
-    {
-      "id": "5b3cd39e",
-      "product": "SR1",
-      "trade_type": "Butterfly (Fly)",
-      "legs": [
-        "SR1Q26 (Aug)",
-        "SR1U26 (Sep)",
-        "SR1V26 (Oct)"
-      ],
-      "instrument_key": "SR1Q26 (Aug)/SR1U26 (Sep)/SR1V26 (Oct)",
-      "display_name": "[FLY 1M] SR1Q26 (Aug)/SR1U26 (Sep)/SR1V26 (Oct)",
+      "instrument_key": "SR1N26 (Jul)",
+      "display_name": "[OUT] SR1N26 (Jul)",
       "side": "BUY",
       "lots": 4,
-      "entry_price": 0.0125,
+      "entry_price": 96.3625,
       "entry_source": "Live Mid",
       "notes": "",
-      "created_at": "2026-04-27T13:30:06"
-    },
-    {
-      "id": "fb32b6f2",
-      "product": "SR1",
-      "trade_type": "Spread",
-      "legs": [
-        "SR1N26 (Jul)",
-        "SR1Q26 (Aug)"
-      ],
-      "instrument_key": "SR1Q26 (Aug)-SR1N26 (Jul)",
-      "display_name": "[SPD 1M] SR1Q26 (Aug)-SR1N26 (Jul)",
-      "side": "BUY",
-      "lots": 1,
-      "entry_price": 0.015,
-      "entry_source": "Live Mid",
-      "notes": "",
-      "created_at": "2026-04-27T15:18:21"
-    },
-    {
-      "id": "f928bcd8",
-      "product": "ZQ",
-      "trade_type": "Spread",
-      "legs": [
-        "ZQJ26 (Apr)",
-        "ZQK26 (May)"
-      ],
-      "instrument_key": "ZQK26 (May)-ZQJ26 (Apr)",
-      "display_name": "[SPD 1M] ZQK26 (May)-ZQJ26 (Apr)",
-      "side": "BUY",
-      "lots": 1,
-      "entry_price": 0.0,
-      "entry_source": "Live Mid",
-      "notes": "",
-      "created_at": "2026-04-27T15:32:47"
+      "created_at": "2026-05-01T13:54:23"
     }
   ]
 }

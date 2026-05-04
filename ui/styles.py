@@ -257,12 +257,40 @@ h3 { color: #FFB347 !important; font-size: 11px !important; letter-spacing: 1px 
 /* ── Bloomberg Table ──────────────────────────────────────────────── */
 .bb-table-wrap {
     overflow-x: auto;
+    overflow-y: visible;
+    width: 100%;
+    max-width: 100%;
     border: 1px solid #333;
     margin-bottom: 10px;
     background: #000;
+    /* Force a clearly visible horizontal scrollbar — overrides the global
+       5px webkit rule above. Tables can be 1000s of px wide with many cases. */
+    scrollbar-color: #FF6600 #0a1628;
+    scrollbar-width: auto;
+}
+.bb-table-wrap::-webkit-scrollbar {
+    height: 12px !important;
+    width: 10px !important;
+}
+.bb-table-wrap::-webkit-scrollbar-track {
+    background: #0a1628 !important;
+    border-top: 1px solid #1a3050;
+}
+.bb-table-wrap::-webkit-scrollbar-thumb {
+    background: #FF6600 !important;
+    border-radius: 6px;
+    border: 2px solid #0a1628;
+}
+.bb-table-wrap::-webkit-scrollbar-thumb:hover {
+    background: #FFB347 !important;
 }
 table.bb-table {
-    width: 100%;
+    /* Was width:100% — that forced the table to shrink-fit the wrap, so the
+       wrap's overflow-x:auto never kicked in. min-content + min-width:100%
+       lets the table grow as wide as its columns need (triggering the
+       horizontal scrollbar) while still filling the wrap when narrow. */
+    width: max-content;
+    min-width: 100%;
     border-collapse: collapse;
     font-size: 11px;
     table-layout: auto;

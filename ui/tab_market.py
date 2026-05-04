@@ -222,7 +222,7 @@ def render_market_tab(base_sofr: float, base_effr: float, n_cases: int, cm):
     # ── Full Historical Dashboard (bidirectional component) ───────────────
     _ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets")
     _dashboard_component = components.declare_component("stir_dashboard", path=_ASSETS_DIR)
-    selected_date = _dashboard_component(key="stir_dash", height=1400, default=None)
+    selected_date = _dashboard_component(key="stir_dash", height=2200, default=None)
 
     # ── Structures + Trade Notes (driven by dashboard slider) ─────────────
     _render_date_analysis_section(selected_date)
@@ -385,198 +385,6 @@ def _render_date_analysis_section(js_selected_date=None):
             return meetings_from_date[i].get("label", f"FED{i+1}")
         return f"FED{i+1}"
 
-    # ── Quarterly Diff Tables (render FIRST so they're visible) ───────────
-    bb_subsection(f"MEETING DIFFS — {selected_date}")
-    col_qq, col_nq, col_mix = st.columns(3)
-
-    # Classify meetings as SEP or non-SEP using data.js FOMC meetings
-    num_mtgs = min(len(meetings_from_date), 21)
-    sep_indices = [i for i in range(num_mtgs) if premiums[i] is not None and meetings_from_date[i].get("isSEP")]
-    nsep_indices = [i for i in range(num_mtgs) if premiums[i] is not None and not meetings_from_date[i].get("isSEP")]
-
-    def _build_diff_table(indices, title):
-        if len(indices) < 2:
-            return f"<span style='color:#555;font-size:10px;'>Not enough {title} data</span>"
-        html = '<div class="bb-table-wrap"><table class="bb-table">'
-        html += '<thead><tr><th>FROM</th><th>TO</th><th>DIFF (bps)</th></tr></thead><tbody>'
-        for k in range(len(indices) - 1):
-            i1, i2 = indices[k], indices[k + 1]
-            diff = round(premiums[i2] - premiums[i1], 2)
-            cls = "pos-val" if diff > 0.01 else ("neg-val" if diff < -0.01 else "zero-val")
-            lbl1 = _meeting_label(i1)
-            lbl2 = _meeting_label(i2)
-            html += f'<tr><td class="bb-row-label">{lbl1}</td><td>{lbl2}</td><td class="{cls}">{diff:+.2f}</td></tr>'
-        html += '</tbody></table></div>'
-        return html
-
-    def _build_mixed_diff_table():
-        """Q→nQ mixed diff table."""
-        all_valid = [i for i in range(num_mtgs) if premiums[i] is not None]
-        if len(all_valid) < 2:
-            return "<span style='color:#555;font-size:10px;'>Not enough mixed data</span>"
-        html = '<div class="bb-table-wrap"><table class="bb-table">'
-        html += '<thead><tr><th>FROM</th><th>TO</th><th>DIFF (bps)</th></tr></thead><tbody>'
-        for k in range(len(all_valid) - 1):
-            i1, i2 = all_valid[k], all_valid[k + 1]
-            is_sep_1 = meetings_from_date[i1].get("isSEP") if i1 < len(meetings_from_date) else False
-            is_sep_2 = meetings_from_date[i2].get("isSEP") if i2 < len(meetings_from_date) else False
-            # Only show cross-type pairs (SEP→nonSEP or nonSEP→SEP)
-            if is_sep_1 == is_sep_2:
-                continue
-            diff = round(premiums[i2] - premiums[i1], 2)
-            cls = "pos-val" if diff > 0.01 else ("neg-val" if diff < -0.01 else "zero-val")
-            lbl1 = _meeting_label(i1)
-            lbl2 = _meeting_label(i2)
-            html += f'<tr><td class="bb-row-label">{lbl1}</td><td>{lbl2}</td><td class="{cls}">{diff:+.2f}</td></tr>'
-        html += '</tbody></table></div>'
-        return html
-
-    with col_qq:
-        st.markdown("**Q→Q (SEP meetings)**")
-        st.markdown(_build_diff_table(sep_indices, "SEP"), unsafe_allow_html=True)
-
-    with col_nq:
-        st.markdown("**nQ→nQ (Non-SEP meetings)**")
-        st.markdown(_build_diff_table(nsep_indices, "non-SEP"), unsafe_allow_html=True)
-
-    with col_mix:
-        st.markdown("**Q→nQ (Mixed)**")
-        st.markdown(_build_mixed_diff_table(), unsafe_allow_html=True)
-
-    # ── Neutral Rate + Annual Cuts/Hikes ──────────────────────────────────
-    sr3_row_nr = sr3_data.get(selected_date)
-    if sr3_row_nr:
-        col_nr, col_ac = st.columns(2)
-
-        # ── Neutral Rate ──────────────────────────────────────────────
-        with col_nr:
-            bb_subsection(f"NEUTRAL RATE — {selected_date}")
-            sr3_prices_nr = []
-            for i in range(1, 24):
-                v = sr3_row_nr.get(f"sra{i}")
-                if v is not None:
-                    sr3_prices_nr.append(float(v))
-            if sr3_prices_nr:
-                max_price = max(sr3_prices_nr)
-                neutral_rate = 100 - max_price
-                nr_html = '<div class="bb-table-wrap"><table class="bb-table">'
-                nr_html += '<thead><tr><th>DATE</th><th>MAX SR3 PRICE</th><th>NEUTRAL RATE</th></tr></thead><tbody>'
-                nr_html += f'<tr><td class="bb-row-label">{selected_date}</td>'
-                nr_html += f'<td>{max_price:.5f}</td>'
-                nr_html += f'<td class="pos-val">{neutral_rate:.3f}%</td></tr>'
-                # Previous days
-                for offset in range(1, 6):
-                    if idx - offset >= 0:
-                        p_date = available_dates[idx - offset]
-                        p_sr3 = sr3_data.get(p_date)
-                        if p_sr3:
-                            p_prices = [float(p_sr3.get(f"sra{i}")) for i in range(1, 24) if p_sr3.get(f"sra{i}") is not None]
-                            if p_prices:
-                                p_max = max(p_prices)
-                                p_nr = 100 - p_max
-                                nr_html += f'<tr><td class="bb-row-label">{p_date}</td>'
-                                nr_html += f'<td>{p_max:.5f}</td>'
-                                nr_html += f'<td>{p_nr:.3f}%</td></tr>'
-                nr_html += '</tbody></table></div>'
-                st.markdown(nr_html, unsafe_allow_html=True)
-
-        # ── Annual Cuts/Hikes Priced ──────────────────────────────────
-        with col_ac:
-            bb_subsection(f"ANNUAL CUTS/HIKES PRICED — {selected_date}")
-            # Compute from SR3 3M spreads grouped by year
-            sr3_all = []
-            for i in range(1, 24):
-                v = sr3_row_nr.get(f"sra{i}")
-                if v is not None and i < len(sr3_contracts) + 1:
-                    contract = sr3_contracts[i - 1] if (i - 1) < len(sr3_contracts) else None
-                    if contract:
-                        expiry = contract.get("expiry", "")
-                        yr = int(expiry[:4]) if len(expiry) >= 4 else 0
-                        sr3_all.append({"idx": i, "price": float(v), "year": yr, "contract": contract.get("contract", "")})
-
-            # Group spreads by year
-            if len(sr3_all) >= 2:
-                year_cuts = {}
-                for k in range(len(sr3_all) - 1):
-                    sp_bps = -(sr3_all[k + 1]["price"] - sr3_all[k]["price"]) * 100
-                    yr = sr3_all[k + 1]["year"]
-                    if yr not in year_cuts:
-                        year_cuts[yr] = {"h1": 0, "h2": 0}
-                    # H1 = Q1+Q2 (months 1-6), H2 = Q3+Q4 (months 7-12)
-                    expiry_month = int(sr3_all[k + 1]["contract"].split("-")[1]) if "-" in sr3_all[k + 1].get("contract", "") else 0
-                    # Use contract expiry to determine half
-                    exp = sr3_contracts[sr3_all[k + 1]["idx"] - 1].get("expiry", "") if (sr3_all[k + 1]["idx"] - 1) < len(sr3_contracts) else ""
-                    month = int(exp[5:7]) if len(exp) >= 7 else 6
-                    if month <= 6:
-                        year_cuts[yr]["h1"] += sp_bps
-                    else:
-                        year_cuts[yr]["h2"] += sp_bps
-
-                ac_html = '<div class="bb-table-wrap"><table class="bb-table">'
-                ac_html += '<thead><tr><th>YEAR</th><th>H1 (bps)</th><th>H2 (bps)</th><th>FULL YEAR</th><th>DIRECTION</th></tr></thead><tbody>'
-                for yr in sorted(year_cuts.keys()):
-                    if yr < 2025:
-                        continue
-                    h1 = round(year_cuts[yr]["h1"], 1)
-                    h2 = round(year_cuts[yr]["h2"], 1)
-                    total = round(h1 + h2, 1)
-                    direction = "🟦 CUT" if total < -0.5 else ("🟩 HIKE" if total > 0.5 else "— HOLD")
-                    cls = "neg-val" if total < -0.5 else ("pos-val" if total > 0.5 else "zero-val")
-                    h1_cls = "neg-val" if h1 < -0.5 else ("pos-val" if h1 > 0.5 else "zero-val")
-                    h2_cls = "neg-val" if h2 < -0.5 else ("pos-val" if h2 > 0.5 else "zero-val")
-                    ac_html += f'<tr><td class="bb-row-label">{yr}</td>'
-                    ac_html += f'<td class="{h1_cls}">{h1:+.0f} bps</td>'
-                    ac_html += f'<td class="{h2_cls}">{h2:+.0f} bps</td>'
-                    ac_html += f'<td class="{cls}">{total:+.0f} bps</td>'
-                    ac_html += f'<td>{direction}</td></tr>'
-                ac_html += '</tbody></table></div>'
-                st.markdown(ac_html, unsafe_allow_html=True)
-
-    # ── SR3 3M Spread Table ────────────────────────────────────────────────
-    sr3_row = sr3_data.get(selected_date)
-    sr3_prev = sr3_data.get(prev_date) if prev_date else None
-    if sr3_row:
-        bb_subsection(f"SR3 3M SPREAD TABLE — {selected_date}")
-        sr3_prices = []
-        for i in range(1, 24):
-            v = sr3_row.get(f"sra{i}")
-            sr3_prices.append(float(v) if v is not None else None)
-        sp_labels, sp_vals, sp_prev_vals = [], [], []
-        for i in range(len(sr3_prices) - 1):
-            if sr3_prices[i] is not None and sr3_prices[i + 1] is not None:
-                sp = -(sr3_prices[i + 1] - sr3_prices[i]) * 100
-                c1 = sr3_contracts[i]["contract"].replace("SR3 ", "") if i < len(sr3_contracts) else f"C{i+1}"
-                c2 = sr3_contracts[i + 1]["contract"].replace("SR3 ", "") if (i + 1) < len(sr3_contracts) else f"C{i+2}"
-                sp_labels.append(f"{c1}/{c2}")
-                sp_vals.append(round(sp, 2))
-                if sr3_prev:
-                    p1 = sr3_prev.get(f"sra{i+1}")
-                    p2 = sr3_prev.get(f"sra{i+2}")
-                    if p1 is not None and p2 is not None:
-                        sp_prev_vals.append(round(-(float(p2) - float(p1)) * 100, 2))
-                    else:
-                        sp_prev_vals.append(None)
-        sp_table = '<div class="bb-table-wrap"><table class="bb-table">'
-        sp_table += '<thead><tr><th>SPREAD</th><th>CURRENT</th><th>PREV</th><th>CHG</th></tr></thead><tbody>'
-        for j in range(len(sp_vals)):
-            cur = sp_vals[j]
-            prv = sp_prev_vals[j] if j < len(sp_prev_vals) else None
-            chg_val = round(cur - prv, 2) if prv is not None else None
-            cls = "pos-val" if cur > 0.01 else ("neg-val" if cur < -0.01 else "zero-val")
-            chg_cls, chg_str = "", "—"
-            if chg_val is not None:
-                chg_cls = "pos-val" if chg_val > 0.01 else ("neg-val" if chg_val < -0.01 else "zero-val")
-                chg_str = f"{chg_val:+.2f}"
-            prv_str = f"{prv:.2f}" if prv is not None else "—"
-            sp_table += (
-                f'<tr><td class="bb-row-label">{sp_labels[j]}</td>'
-                f'<td class="{cls}">{cur:.2f}</td>'
-                f'<td>{prv_str}</td>'
-                f'<td class="{chg_cls}">{chg_str}</td></tr>'
-            )
-        sp_table += '</tbody></table></div>'
-        st.markdown(sp_table, unsafe_allow_html=True)
-
     # ── Premium Values + Trade Notes side by side ─────────────────────────
     next_date = available_dates[idx + 1] if idx < n - 1 else None
     col_prem, col_notes = st.columns([3, 2])
@@ -670,6 +478,24 @@ def _render_date_analysis_section(js_selected_date=None):
         prev_premiums = [prev_row.get(f"fed{i}") for i in range(1, 22)]
         prev_structs = _compute_premium_structures(prev_premiums)
 
+    # Build a mapping from fed-index to month labels (e.g. fed1 -> "Sep25")
+    _month_labels = {}
+    for i, m in enumerate(meetings_from_date[:21]):
+        lbl = m.get("label", "")
+        parts = lbl.split()
+        if len(parts) >= 2:
+            # e.g. "September 2025" -> "Sep25"
+            mon = parts[0][:3]
+            yr = parts[-1][-2:]  # last 2 digits of year
+            _month_labels[f"fed{i+1}"] = f"{mon}{yr}"
+        else:
+            _month_labels[f"fed{i+1}"] = f"Fed{i+1}"
+
+    def _humanize_structure_key(key: str) -> str:
+        """Replace fed1/fed2/fed3 with Sep25/Dec25/Mar26 style labels."""
+        parts = key.replace("-", "/").split("/")
+        return "/".join(_month_labels.get(p.strip(), p.strip()) for p in parts)
+
     s1, s2, s3, s4 = st.tabs(["↔ SPREADS", "🦋 FLIES", "🔷 CONDORS", "🌀 DEFLYS"])
 
     for tab, stype, label in [
@@ -687,9 +513,10 @@ def _render_date_analysis_section(js_selected_date=None):
             col_labels = [selected_date]
             if prev_structs:
                 col_labels += [f"Prev ({prev_date})", "Chg"]
-            row_labels = list(items.keys())
+            raw_keys = list(items.keys())
+            row_labels = [_humanize_structure_key(k) for k in raw_keys]
             data = []
-            for key in row_labels:
+            for key in raw_keys:
                 r = [items[key]]
                 if prev_structs:
                     pv = prev_structs.get(stype, {}).get(key)

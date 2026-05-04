@@ -14,7 +14,8 @@ from core.structures import (
     compute_spreads, compute_butterflies, compute_condors, compute_deflys,
 )
 from ui.input_panel import (
-    render_base_rates, render_formula_builder, render_case_builder, render_case_list
+    render_base_rates, render_formula_builder, render_case_builder, render_case_list,
+    render_bulk_generator,
 )
 from config.constants import (
     SR1_SPREAD_GAPS, ZQ_SPREAD_GAPS, SR3_SPREAD_GAPS,
@@ -79,15 +80,37 @@ def _prices_for_cases(
 
 # ── Case selector ─────────────────────────────────────────────────────────────
 
+MULTISELECT_THRESHOLD = 100  # above this, the multiselect itself is the bottleneck
+
+
 def _case_selector(cm) -> List[dict]:
     if not cm.cases:
         st.info("No cases yet — build them in the input panel above.")
         return []
 
-    opts = [f"{c['id']} | {c['name']}" for c in cm.cases]
-    n_cases = len(opts)
+    n_cases = len(cm.cases)
 
-    # ── Controls row: Select All / Clear ──────────────────────────────────────
+    # ── Many cases: skip the multiselect entirely. Streamlit's multiselect
+    # widget renders all options into the DOM; with 1000+ items it freezes
+    # the browser before the window slider even gets to do its job.
+    # Treat ALL cases as selected and let _apply_display_window do the work.
+    if n_cases > MULTISELECT_THRESHOLD:
+        st.markdown(
+            f"<div style='color:#FF8C00;font-size:11px;letter-spacing:1px;"
+            f"margin-bottom:4px;'>"
+            f"📂 ALL CASES ({n_cases:,}) — multiselect disabled for performance"
+            f"</div>"
+            f"<small style='color:#888'>"
+            f"With {n_cases:,} cases the multiselect dropdown is too slow. "
+            f"All cases are treated as selected; use the display window slider "
+            f"below to scroll through them in chunks."
+            f"</small>",
+            unsafe_allow_html=True,
+        )
+        return list(cm.cases)
+
+    # ── ≤ MULTISELECT_THRESHOLD: keep the rich multiselect ─────────────────
+    opts = [f"{c['id']} | {c['name']}" for c in cm.cases]
     sel_key = "struct_case_sel"
     ca, cb, cc = st.columns([2, 1, 1])
     with ca:
@@ -103,28 +126,20 @@ def _case_selector(cm) -> List[dict]:
         if st.button("✕ Clear", key="case_sel_clear", help="Clear selection"):
             st.session_state[sel_key] = []
 
-    # ── Determine sensible default: last N added (so new cases appear immediately)
-    # We always default to ALL cases so users can see them right after adding.
-    # For very large sets (>50) default to the last 10 to keep table manageable.
     if sel_key not in st.session_state:
-        if n_cases <= 50:
-            st.session_state[sel_key] = opts[:]
-        else:
-            st.session_state[sel_key] = opts[-10:]  # last 10 added
+        st.session_state[sel_key] = opts[:]
 
-    # Make sure any previously selected cases that still exist stay selected,
-    # and newly added cases (not yet in session) are appended automatically.
+    # Keep previously-selected cases that still exist; auto-select newly added
+    # only for small batches (manual builder), not bulk dumps.
     current_sel = st.session_state.get(sel_key, [])
-    # Prune stale ids (deleted cases), add newly added ones
     valid_opts_set = set(opts)
     existing_valid = [s for s in current_sel if s in valid_opts_set]
-    # Find newly added cases not yet in the selection
-    existing_set = set(existing_valid)
-    newly_added  = [o for o in opts if o not in existing_set]
-    # If there are newly added cases, auto-select them so they appear immediately
-    if newly_added:
-        merged = existing_valid + newly_added
-        st.session_state[sel_key] = merged
+    existing_set   = set(existing_valid)
+    newly_added    = [o for o in opts if o not in existing_set]
+    if newly_added and len(newly_added) <= 5:
+        st.session_state[sel_key] = existing_valid + newly_added
+    else:
+        st.session_state[sel_key] = existing_valid
 
     sel = st.multiselect(
         "Cases:", opts,
@@ -135,6 +150,52 @@ def _case_selector(cm) -> List[dict]:
 
     ids = [s.split(" | ")[0] for s in sel]
     return [c for c in cm.cases if c["id"] in ids]
+
+
+# ── Display window (caps how many cases are priced/rendered at once) ──────────
+
+MAX_DISPLAY_CASES = 50
+
+
+def _apply_display_window(selected: List[dict]) -> List[dict]:
+    """
+    When the user has many cases selected, render only a sliding window of
+    MAX_DISPLAY_CASES at a time. Pricing + rendering 1000 columns at once
+    freezes the browser; the slider lets the user browse the full set in chunks.
+    """
+    n = len(selected)
+    if n <= MAX_DISPLAY_CASES:
+        return selected
+
+    st.markdown(
+        f"<div style='background:#0a1628;border-left:3px solid #FFB347;"
+        f"padding:6px 12px;margin:8px 0;border-radius:2px;'>"
+        f"<span style='color:#FFB347;font-size:10px;letter-spacing:1px;font-weight:700;'>"
+        f"⚠ DISPLAY WINDOW</span>"
+        f"<span style='color:#888;font-size:10px;'> &nbsp; "
+        f"{n:,} cases selected — rendering only {MAX_DISPLAY_CASES} at a time "
+        f"to keep the UI responsive. Drag the slider to browse the rest."
+        f"</span></div>",
+        unsafe_allow_html=True,
+    )
+
+    max_start = max(1, n - MAX_DISPLAY_CASES + 1)
+    start = st.slider(
+        f"Show cases (window of {MAX_DISPLAY_CASES})",
+        min_value=1, max_value=max_start,
+        value=1, step=1,
+        key="case_window_start",
+        help=f"Index of first case to show. Window size = {MAX_DISPLAY_CASES}.",
+    )
+    end = min(n, start + MAX_DISPLAY_CASES - 1)
+    st.markdown(
+        f"<div style='color:#888;font-size:11px;margin:-6px 0 8px 0;'>"
+        f"Showing <b style='color:#00B4D8;'>{start:,}–{end:,}</b> of "
+        f"<b style='color:#00B4D8;'>{n:,}</b> selected cases."
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    return selected[start - 1:end]
 
 
 # ── Generic table for structure dict {key: value per case} ────────────────────
@@ -196,15 +257,21 @@ def render_structures_tab(cm, sr1c, zqc, sr3c):
     with c2:
         render_case_builder(cm)
         st.markdown("<br>", unsafe_allow_html=True)
+        render_bulk_generator(cm)
+        st.markdown("<br>", unsafe_allow_html=True)
         render_formula_builder(cm)
         
     st.markdown("<hr style='border-color:#333;margin:20px 0;'>", unsafe_allow_html=True)
 
-    selected = _case_selector(cm)
-    if not selected:
+    selected_full = _case_selector(cm)
+    if not selected_full:
         return
 
-    with st.spinner("Computing prices..."):
+    # Cap on-screen cases (pricing + rendering 1000+ columns freezes the UI).
+    # User browses the rest via the slider in _apply_display_window.
+    selected = _apply_display_window(selected_full)
+
+    with st.spinner(f"Computing prices for {len(selected)} cases..."):
         all_prices = _prices_for_cases(selected, sr1c, zqc, sr3c)
 
     # Store for Tab 3
@@ -239,8 +306,13 @@ def render_structures_tab(cm, sr1c, zqc, sr3c):
     )
 
 
-def _render_live_curves(zqc, sr3c, cm):
-    """Render live ZQ meeting premium curve and SR3 3M spread curve."""
+def _render_live_curves(zqc, sr3c, selected_cases):
+    """Render live ZQ meeting premium curve and SR3 3M spread curve.
+
+    `selected_cases` is the windowed case list — overlaying 1000 traces per
+    second on a live-refreshing chart kills the browser, so we restrict to
+    whatever the display window currently contains.
+    """
     import plotly.graph_objects as go
     from core.live_data import get_live_price
     from config.fomc_dates import ALL_FOMC_MEETINGS
@@ -252,6 +324,8 @@ def _render_live_curves(zqc, sr3c, cm):
     # Uses VWAP from live ZQ calendar spread instruments (ZQ_CAL_*)
     # matching CME FedWatch convention: negative = easing expected
     with col_zq:
+        # Compute total cuts/hikes from premiums for the title
+        # (premiums are computed below, so we use a placeholder and update later)
         bb_subsection("ZQ LIVE MEETING PREMIUMS (bps)")
         from core.live_data import LIVE_PRICES
 
@@ -269,7 +343,7 @@ def _render_live_curves(zqc, sr3c, cm):
             if price is not None:
                 zq_prices[(c['year'], c['month'])] = price
 
-        per_mtg, labels, spd_detail = [], [], []
+        per_mtg, labels, spd_detail, per_mtg_meetings = [], [], [], []
 
         for meeting in ALL_FOMC_MEETINGS:
             dec = meeting['decision_date']
@@ -295,8 +369,7 @@ def _render_live_curves(zqc, sr3c, cm):
             vwap = cal_entry.get('VWAP')
 
             if vwap is not None:
-                # TT sends prices ×100; calendar spreads aren't ÷100 back,
-                # so stored VWAP is already in bps scale
+                # Calendar spread VWAP is already in bps-equivalent scale
                 premium = vwap
                 src = f"VWAP={vwap:.6f}"
             else:
@@ -309,6 +382,7 @@ def _render_live_curves(zqc, sr3c, cm):
                 src = f"outrights fp={fp:.4f} bp={bp:.4f}"
 
             per_mtg.append(premium)
+            per_mtg_meetings.append(meeting)
             lbl = dec.strftime("%b '%y")
             if meeting.get('is_sep'):
                 lbl += " *"
@@ -316,6 +390,36 @@ def _render_live_curves(zqc, sr3c, cm):
             spd_detail.append(f"ZQ {fc}-{bc}: {premium:+.4f} bps  ({src})")
 
         if labels:
+            # Compute total and per-year cuts for title display
+            total_zq = sum(per_mtg)
+            # Green = positive (hike), Red = negative (cut)
+            color = "#00FF41" if total_zq > 0 else ("#FF3131" if total_zq < 0 else "#888")
+
+            # Per-year breakdown: group premiums by meeting decision year
+            yr_totals = {}
+            for j, meeting in enumerate(per_mtg_meetings):
+                yr = meeting['decision_date'].year
+                yr_totals[yr] = yr_totals.get(yr, 0) + per_mtg[j]
+
+            yr_chips = ""
+            for yr in sorted(yr_totals.keys()):
+                if yr < 2025:
+                    continue
+                yv = yr_totals[yr]
+                yc = "#00FF41" if yv > 0 else ("#FF3131" if yv < 0 else "#888")
+                yr_chips += (
+                    f"<span style='color:#555;font-size:10px;margin-left:12px;'>│</span>"
+                    f"<span style='color:#888;font-size:10px;margin-left:8px;'>{yr}: </span>"
+                    f"<span style='color:{yc};font-size:11px;font-weight:600;'>{yv:+.1f} bps</span>"
+                )
+
+            st.markdown(
+                f"<div style='text-align:right;margin-top:-18px;margin-bottom:4px;'>"
+                f"<span style='color:#888;font-size:11px;letter-spacing:1px;'>TOTAL: </span>"
+                f"<span style='color:{color};font-size:13px;font-weight:700;'>{total_zq:+.1f} bps</span>"
+                f"{yr_chips}</div>",
+                unsafe_allow_html=True,
+            )
             fig = go.Figure()
             # Single bold live line — per-meeting premium
             fig.add_trace(go.Scatter(
@@ -324,9 +428,10 @@ def _render_live_curves(zqc, sr3c, cm):
                 line=dict(color="#00B4D8", width=3),
                 marker=dict(size=6, color="#00B4D8"),
             ))
-            # Case overlays (dotted)
+            # Case overlays (dotted) — only windowed cases (this fragment runs
+            # every 1s, so iterating 1000 cases here would freeze the browser).
             colors = ["#4f8dff", "#00d4aa", "#f2cd32", "#ff4f8d", "#a78bfa"]
-            for i, case in enumerate(cm.cases):
+            for i, case in enumerate(selected_cases):
                 case_per_mtg = []
                 for m_info in ALL_FOMC_MEETINGS[:len(labels)]:
                     bps = case['meeting_cuts'].get(m_info['effective_date'], 0.0)
@@ -369,7 +474,7 @@ def _render_live_curves(zqc, sr3c, cm):
             price = get_live_price(c['code'], 'SR3')
             if price is not None:
                 sr3_px[c['code']] = price
-        spd_labels, spd_values = [], []
+        spd_labels, spd_values, spd_back_codes = [], [], []
         for i in range(len(sr3c) - 1):
             front, back = sr3c[i], sr3c[i+1]
             pf, pb = sr3_px.get(front['code']), sr3_px.get(back['code'])
@@ -378,7 +483,40 @@ def _render_live_curves(zqc, sr3c, cm):
                 spd = round((pf - pb) * 100, 2)
                 spd_labels.append(f"{front['code'][3:]}-{back['code'][3:]}")
                 spd_values.append(spd)
+                spd_back_codes.append(back['code'])
         if spd_labels:
+            # Compute total and per-year for title display
+            total_sr3 = sum(spd_values)
+            # Green = positive (hike), Red = negative (cut)
+            color_sr3 = "#00FF41" if total_sr3 > 0 else ("#FF3131" if total_sr3 < 0 else "#888")
+
+            # Per-year breakdown: assign each spread to the back contract's year
+            sr3_yr_totals = {}
+            for j in range(len(spd_values)):
+                back_code = spd_back_codes[j]
+                try:
+                    yr = 2000 + int(back_code[-2:])
+                except (ValueError, IndexError):
+                    continue
+                sr3_yr_totals[yr] = sr3_yr_totals.get(yr, 0) + spd_values[j]
+
+            yr_chips_sr3 = ""
+            for yr in sorted(sr3_yr_totals.keys()):
+                yv = sr3_yr_totals[yr]
+                yc = "#00FF41" if yv > 0 else ("#FF3131" if yv < 0 else "#888")
+                yr_chips_sr3 += (
+                    f"<span style='color:#555;font-size:10px;margin-left:12px;'>│</span>"
+                    f"<span style='color:#888;font-size:10px;margin-left:8px;'>{yr}: </span>"
+                    f"<span style='color:{yc};font-size:11px;font-weight:600;'>{yv:+.1f} bps</span>"
+                )
+
+            st.markdown(
+                f"<div style='text-align:right;margin-top:-18px;margin-bottom:4px;'>"
+                f"<span style='color:#888;font-size:11px;letter-spacing:1px;'>TOTAL: </span>"
+                f"<span style='color:{color_sr3};font-size:13px;font-weight:700;'>{total_sr3:+.1f} bps</span>"
+                f"{yr_chips_sr3}</div>",
+                unsafe_allow_html=True,
+            )
             fig2 = go.Figure()
             bar_colors = ["#00FF41" if v >= 0 else "#FF3131" for v in spd_values]
             fig2.add_trace(go.Bar(
@@ -392,13 +530,15 @@ def _render_live_curves(zqc, sr3c, cm):
                 line=dict(color="#00B4D8", width=2), marker=dict(size=4, color="#00B4D8"),
                 showlegend=False,
             ))
+            # Case overlays — windowed cases only (this fragment refreshes
+            # every second, so all-cases iteration would freeze the browser).
             colors = ["#4f8dff", "#00d4aa", "#f2cd32", "#ff4f8d", "#a78bfa"]
-            for ci, case in enumerate(cm.cases):
+            from core.pricing_engine import price_sr3
+            for ci, case in enumerate(selected_cases):
                 cs, cl = [], []
                 for i in range(len(sr3c) - 1):
                     f_, b_ = sr3c[i], sr3c[i+1]
                     p = case.get('rate_path', {}).get('sofr', {})
-                    from core.pricing_engine import price_sr3
                     pf_c = price_sr3(f_['ref_start'], f_['ref_end'], p, case['base_sofr'])
                     pb_c = price_sr3(b_['ref_start'], b_['ref_end'], p, case['base_sofr'])
                     cs.append(round((pf_c - pb_c) * 100, 2))
@@ -455,11 +595,11 @@ def _render_live_fragment(
         )
 
     # ── Live Forward Curves ──────────────────────────────────────────────────
-    _render_live_curves(zqc, sr3c, cm)
+    _render_live_curves(zqc, sr3c, selected)
 
-    sec1, sec2, sec3, sec4, sec5, sec6, sec7 = st.tabs([
+    sec1, sec2, sec3, sec4, sec5, sec6, sec7, sec8 = st.tabs([
         "📌 OUTRIGHTS", "↔ SPREADS", "🦋 BUTTERFLIES", "🔷 CONDORS", "🌀 DEFLYS",
-        "📊 MEETING RANGE", "🔬 STRUCTURES LIVE"
+        "📊 MEETING RANGE", "🔬 STRUCTURES LIVE", "🎯 RANGE TRADES"
     ])
 
     # ─── OUTRIGHTS ────────────────────────────────────────────────────────────
@@ -560,32 +700,60 @@ def _render_live_fragment(
     # ─── MEETING RANGE ────────────────────────────────────────────────────────
     with sec6:
         bb_section("MEETING RANGE ANALYSIS")
-        _render_meeting_range(cm)
+        # Pass `selected` (windowed) so per-case columns don't blow up with 1000 cases.
+        # Aggregate stats (min/max/mean/mode) still come from the full cm.cases.
+        _render_meeting_range(cm, selected)
 
     # ─── STRUCTURES LIVE ──────────────────────────────────────────────────────
     with sec7:
         bb_section("STRUCTURES LIVE")
-        _render_structures_live(cm, zqc, sr3c)
+        _render_structures_live(selected, zqc, sr3c)
+
+    # ─── RANGE TRADES ─────────────────────────────────────────────────────────
+    with sec8:
+        bb_section("RANGE TRADE FINDER")
+        _render_range_trades(cm, sr1c, zqc, sr3c)
 
 
 
-def _render_meeting_range(cm):
+def _render_meeting_range(cm, selected):
+    """
+    Aggregate stats (min/max/mean/mode) computed across the FULL cm.cases set
+    so the chart still shows the true distribution. The per-case-column table
+    is restricted to `selected` (windowed) to avoid rendering 1000 columns.
+    """
     analysis = cm.meeting_range_analysis()
     if not analysis:
         st.info("No cases to analyze.")
         return
 
-    bb_subsection("ALL MEETINGS — CUT/HIKE RANGE ACROSS CASES")
-    # Columns are the names of all cases in the CM
-    col_labels = [c["name"][:15] for c in cm.cases]
-    row_labels = []
-    data = []
+    n_total = len(cm.cases)
+    n_shown = len(selected)
+    if n_total > n_shown:
+        bb_subsection(
+            f"ALL MEETINGS — CUT/HIKE RANGE  (stats across {n_total} cases · "
+            f"showing {n_shown} columns from window)"
+        )
+    else:
+        bb_subsection("ALL MEETINGS — CUT/HIKE RANGE ACROSS CASES")
+
+    # Restrict per-case columns to the windowed selection.
+    selected_ids   = [c["id"] for c in selected]
+    case_id_index  = {c["id"]: i for i, c in enumerate(cm.cases)}  # map id → column index in row["values"]
+    col_labels     = [c["name"][:15] for c in selected]
+    row_labels, data = [], []
     for row in analysis:
         lbl = row["decision_date"].strftime("%Y %b %d")
         if row["is_sep"]:
             lbl += " ⭐"
         row_labels.append(lbl)
-        data.append(row["values"])
+        # row["values"] is in cm.cases order — pick out the selected ones
+        data.append([
+            row["values"][case_id_index[cid]]
+            if cid in case_id_index and case_id_index[cid] < len(row["values"])
+            else 0.0
+            for cid in selected_ids
+        ])
 
     st.markdown(render_bloomberg_table(row_labels, col_labels, data), unsafe_allow_html=True)
 
@@ -686,8 +854,12 @@ def _render_meeting_range(cm):
         c4.metric("RANGE", f"{row['range']:.2f} bps")
 
 
-def _render_structures_live(cm, zqc, sr3c):
-    """Render live ZQ fly and SR3 spread values vs case projections."""
+def _render_structures_live(selected, zqc, sr3c):
+    """Render live ZQ fly and SR3 spread values vs case projections.
+
+    `selected` is the windowed case list (capped at MAX_DISPLAY_CASES) so this
+    sub-tab no longer iterates 1000 cases for every row of every table.
+    """
     import plotly.graph_objects as go
     from core.live_data import LIVE_PRICES, get_live_price
 
@@ -794,34 +966,34 @@ def _render_structures_live(cm, zqc, sr3c):
             prices.append(p)
         return (prices[0] - prices[1]) * 100  # bps
 
-    case_names = [c['name'][:15] for c in cm.cases]
+    case_names = [c['name'][:15] for c in selected]
 
     col1, col2 = st.columns(2)
 
     # ── ZQ Flies ──────────────────────────────────────────────────────────
     with col1:
         bb_section("ZQ MEETING BUTTERFLIES")
-        hdr = "<tr><th style='text-align:left;padding:4px 8px;color:#00B4D8;'>Structure</th>"
-        hdr += "<th style='padding:4px 8px;color:#00B4D8;'>LIVE</th>"
-        for cn in case_names:
-            hdr += f"<th style='padding:4px 8px;color:#a78bfa;'>{cn}</th>"
-        hdr += "</tr>"
-        rows = ""
+        # Use render_bloomberg_table → wraps in bb-table-wrap (scroll) and gives
+        # each column min-width:80px so case columns can't overlap each other.
+        zq_row_labels = []
+        zq_data       = []
         fly_names, fly_vals = [], []
         for name, legs in ZQ_FLIES:
             val = _live_fly(legs)
-            fly_names.append(name.replace("ZQ ","").replace(" Fly",""))
+            fly_names.append(name.replace("ZQ ", "").replace(" Fly", ""))
             fly_vals.append(val if val is not None else 0)
-            rows += f"<tr><td style='padding:3px 8px;color:#C0C0C0;white-space:nowrap;'>{name}</td>"
-            rows += f"<td style='padding:3px 8px;text-align:center;'>{_cv(val)}</td>"
-            for case in cm.cases:
-                cv = _case_zq_fly(case, legs)
-                rows += f"<td style='padding:3px 8px;text-align:center;'>{_cv(cv)}</td>"
-            rows += "</tr>"
+            zq_row_labels.append(name)
+            zq_data.append([val] + [_case_zq_fly(c, legs) for c in selected])
+
         st.markdown(
-            f"<table style='width:100%;border-collapse:collapse;font-size:12px;font-family:monospace;'>"
-            f"<thead style='border-bottom:1px solid #333;'>{hdr}</thead><tbody>{rows}</tbody></table>",
-            unsafe_allow_html=True)
+            render_bloomberg_table(
+                zq_row_labels,
+                ["LIVE"] + case_names,
+                zq_data,
+                fmt="{:+.3f}",
+            ),
+            unsafe_allow_html=True,
+        )
 
         # Bar chart
         bb_subsection("ZQ FLY VALUES")
@@ -840,27 +1012,25 @@ def _render_structures_live(cm, zqc, sr3c):
     # ── SR3 Spreads ───────────────────────────────────────────────────────
     with col2:
         bb_section("SR3 CALENDAR SPREADS (1Q)")
-        hdr2 = "<tr><th style='text-align:left;padding:4px 8px;color:#00B4D8;'>Structure</th>"
-        hdr2 += "<th style='padding:4px 8px;color:#00B4D8;'>LIVE</th>"
-        for cn in case_names:
-            hdr2 += f"<th style='padding:4px 8px;color:#a78bfa;'>{cn}</th>"
-        hdr2 += "</tr>"
-        rows2 = ""
+        sr3_row_labels = []
+        sr3_data       = []
         spd_names, spd_vals = [], []
         for name, legs in SR3_SPDS:
             val = _live_spread(legs)
-            spd_names.append(name.replace("SR3 ",""))
+            spd_names.append(name.replace("SR3 ", ""))
             spd_vals.append(val if val is not None else 0)
-            rows2 += f"<tr><td style='padding:3px 8px;color:#C0C0C0;white-space:nowrap;'>{name}</td>"
-            rows2 += f"<td style='padding:3px 8px;text-align:center;'>{_cv(val)}</td>"
-            for case in cm.cases:
-                cv = _case_sr3_spread(case, legs)
-                rows2 += f"<td style='padding:3px 8px;text-align:center;'>{_cv(cv)}</td>"
-            rows2 += "</tr>"
+            sr3_row_labels.append(name)
+            sr3_data.append([val] + [_case_sr3_spread(c, legs) for c in selected])
+
         st.markdown(
-            f"<table style='width:100%;border-collapse:collapse;font-size:12px;font-family:monospace;'>"
-            f"<thead style='border-bottom:1px solid #333;'>{hdr2}</thead><tbody>{rows2}</tbody></table>",
-            unsafe_allow_html=True)
+            render_bloomberg_table(
+                sr3_row_labels,
+                ["LIVE"] + case_names,
+                sr3_data,
+                fmt="{:+.3f}",
+            ),
+            unsafe_allow_html=True,
+        )
 
         bb_subsection("SR3 SPREAD VALUES")
         fig2 = go.Figure()
@@ -883,3 +1053,614 @@ def _render_structures_live(cm, zqc, sr3c):
         for name, legs in SR3_SPDS[:3]:
             vals = {l: _get_price(l) for l in legs}
             st.text(f"{name}: {vals}")
+
+
+# ── Range Trade Finder ────────────────────────────────────────────────────────
+
+def _render_range_trades(cm, sr1c, zqc, sr3c):
+    """
+    Range-Bound Trade Finder.
+
+    Idea: each "case" is a different Fed path. For every instrument we know
+    its dollar value (= price × contract multiplier) under every case. A
+    combo of two legs in some integer-ratio (a, b) is "range-bound" when
+        range_across_cases( a · V_primary  +  b · V_hedge )
+    is small in dollar terms — meaning whatever case actually plays out, the
+    combo's value barely moves. Capture the trade vs. live entry, hold to
+    expiry, PnL is bounded by the residual range.
+
+    Three sections:
+      1. STRUCTURE RANGE TABLE — every instrument's $ range, with filters.
+      2. HEDGE FINDER — pick a primary leg, see the best 1-leg hedges
+         ranked by absolute residual $ range. Trivially-flat primaries
+         hidden by a min-range gate.
+      3. TRADE INSPECTOR — for the chosen trade (or one you override the
+         ratio of), shows per-case combo $ value distribution + worst/best
+         PnL if you enter at the mean.
+    """
+    import numpy as np
+    import plotly.graph_objects as go
+    from core.range_finder import (
+        build_instrument_matrix, per_instrument_stats, find_best_hedges,
+        MULTIPLIER,
+    )
+
+    n_total = len(cm.cases)
+    if n_total == 0:
+        st.info("No cases yet. Build cases first to find range-bound trades.")
+        return
+    if n_total < 2:
+        st.warning("Need at least 2 cases to find range-bound trades.")
+        return
+
+    st.markdown(
+        "<small style='color:#888'>"
+        "Find leg combinations whose <b>$ value barely moves across all your "
+        "cases</b>. Values are in dollars (price × CME multiplier: SR1/ZQ "
+        "$4,167 per pt, SR3 $2,500 per pt). Range = max − min across cases. "
+        "Lower residual range ⇒ tighter, more range-bound trade."
+        "</small>",
+        unsafe_allow_html=True,
+    )
+
+    # ── Cache state + Compute button ─────────────────────────────────────
+    cached_n    = st.session_state.get("_range_n",    0)
+    cached_keys = st.session_state.get("_range_keys", None)
+    cached_mat  = st.session_state.get("_range_mat",  None)
+
+    state_cols = st.columns([3, 1])
+    with state_cols[0]:
+        if cached_mat is None:
+            status = (
+                f"<div style='color:#FFB347;font-size:11px;'>⚠ No analysis yet — "
+                f"click → to compute across all {n_total:,} cases.</div>"
+            )
+        elif cached_n != n_total:
+            status = (
+                f"<div style='color:#FFB347;font-size:11px;'>⚠ Stale: ran with "
+                f"{cached_n:,} cases, you now have {n_total:,}. Click → to refresh.</div>"
+            )
+        else:
+            status = (
+                f"<div style='color:#00FF41;font-size:11px;'>✓ Fresh — "
+                f"{n_total:,} cases × {cached_mat.shape[1]:,} instruments "
+                f"(values in bps).</div>"
+            )
+        st.markdown(status, unsafe_allow_html=True)
+    with state_cols[1]:
+        compute = st.button(
+            f"🔄 Compute  ({n_total:,} cases)",
+            key="range_compute_btn", type="primary",
+            use_container_width=True,
+        )
+
+    if compute:
+        prog_text = st.empty()
+        prog_bar  = st.progress(0)
+        def _on_progress(done: int, total: int):
+            if done == total or done % max(1, total // 50) == 0:
+                prog_text.markdown(
+                    f"<small style='color:#FFB347;'>Pricing case "
+                    f"{done:,} / {total:,}…</small>",
+                    unsafe_allow_html=True,
+                )
+                prog_bar.progress(done / total)
+
+        keys, matrix = build_instrument_matrix(
+            cm.cases, sr1c, zqc, sr3c, progress=_on_progress,
+        )
+        prog_text.empty()
+        prog_bar.empty()
+        st.session_state["_range_keys"] = keys
+        st.session_state["_range_mat"]  = matrix
+        st.session_state["_range_n"]    = n_total
+        st.rerun()
+
+    if cached_mat is None:
+        return
+
+    keys   = cached_keys
+    matrix = cached_mat
+    stats  = per_instrument_stats(matrix)
+
+    # Parse "PRODUCT·TYPE·GAP·NAME" once for filtering / grouping
+    parsed = [k.split("·") for k in keys]
+    products_all = sorted({p[0] for p in parsed})
+    types_all    = sorted({p[1] for p in parsed})
+
+    # Precompute bps arrays (stored as $ = price_pt × mult; bps = $/mult × 100)
+    bps_rng  = np.array([stats["range"][i] / MULTIPLIER.get(parsed[i][0], 1.0) * 100 for i in range(len(keys))])
+    bps_min  = np.array([stats["min"][i]   / MULTIPLIER.get(parsed[i][0], 1.0) * 100 for i in range(len(keys))])
+    bps_max  = np.array([stats["max"][i]   / MULTIPLIER.get(parsed[i][0], 1.0) * 100 for i in range(len(keys))])
+    bps_mean = np.array([stats["mean"][i]  / MULTIPLIER.get(parsed[i][0], 1.0) * 100 for i in range(len(keys))])
+    bps_std  = np.array([stats["std"][i]   / MULTIPLIER.get(parsed[i][0], 1.0) * 100 for i in range(len(keys))])
+
+    # ════════════════════════════════════════════════════════════════════
+    # SECTION 1 — Structure Range Table  (grouped by product & type, bps)
+    # ════════════════════════════════════════════════════════════════════
+    bb_subsection("① STRUCTURE RANGE TABLE  —  bps range of every instrument across all cases")
+
+    f1, f2, f3 = st.columns([2, 2, 2])
+    with f1:
+        sel_products = st.multiselect(
+            "Products", products_all, default=products_all, key="range_filter_prod",
+        )
+    with f2:
+        sel_types = st.multiselect(
+            "Types  (OUT=Outright · SPR=Spread · FLY=Fly · CON=Condor · DEF=Defly)",
+            types_all, default=types_all, key="range_filter_type",
+        )
+    with f3:
+        sort_dir = st.radio(
+            "Sort by Range",
+            ["High → Low (most volatile first)", "Low → High (tightest first)"],
+            key="range_sort_dir", horizontal=False,
+        )
+
+    f4, f5 = st.columns([2, 2])
+    with f4:
+        min_range_bps = st.number_input(
+            "Hide rows with range below (bps)", min_value=0.0, value=0.0, step=0.5,
+            key="range_filter_min",
+            help="Filter out instruments that barely move across your cases.",
+        )
+    with f5:
+        n_show = st.slider(
+            "Show top N rows per group", 5, min(200, len(keys)) if keys else 5,
+            min(30, len(keys)) if keys else 5,
+            key="range_tight_topn",
+        )
+
+    _TYPE_LABELS = {"OUT": "OUTRIGHTS", "SPR": "SPREADS", "FLY": "BUTTERFLIES",
+                    "CON": "CONDORS", "DEF": "DEFLYS"}
+    _TYPE_ORDER  = ["OUT", "SPR", "FLY", "CON", "DEF"]
+
+    def _bps_table(row_lbs, col_lbs, rows) -> str:
+        """Bloomberg-styled table that renders pre-formatted string cells."""
+        h = '<div class="bb-table-wrap"><table class="bb-table"><thead><tr>'
+        h += '<th>CONTRACT</th>'
+        for c in col_lbs:
+            h += f'<th>{c}</th>'
+        h += '</tr></thead><tbody>'
+        for rl, row in zip(row_lbs, rows):
+            h += f'<tr><td class="bb-row-label">{rl}</td>'
+            for val in row:
+                if val is None:
+                    h += '<td class="zero-val">—</td>'
+                else:
+                    try:
+                        fval = float(str(val).replace(",", ""))
+                        cls  = ("pos-val" if fval > 0.0001 else
+                                "neg-val" if fval < -0.0001 else "zero-val")
+                        h += f'<td class="{cls}">{val}</td>'
+                    except (TypeError, ValueError):
+                        h += f'<td class="zero-val">{val}</td>'
+            h += '</tr>'
+        h += '</tbody></table></div>'
+        return h
+
+    grand_total = 0
+    for _prod in sorted(sel_products):
+        _mult = MULTIPLIER.get(_prod, 1.0)
+        prod_match = [
+            i for i in range(len(keys))
+            if parsed[i][0] == _prod
+            and parsed[i][1] in sel_types
+            and bps_rng[i] >= min_range_bps
+        ]
+        if not prod_match:
+            continue
+
+        with st.expander(
+            f"📊 {_prod}  —  {len(prod_match):,} matching instruments",
+            expanded=True,
+        ):
+            for _ttype in _TYPE_ORDER:
+                if _ttype not in sel_types:
+                    continue
+                grp = [i for i in prod_match if parsed[i][1] == _ttype]
+                if not grp:
+                    continue
+
+                grp_arr = np.array(grp)
+                if sort_dir.startswith("High"):
+                    ord_local = np.argsort(-bps_rng[grp_arr])
+                else:
+                    ord_local = np.argsort(bps_rng[grp_arr])
+                top_grp = [grp[j] for j in ord_local[:n_show]]
+
+                st.markdown(
+                    f"<div style='color:#FFB347;font-size:10px;letter-spacing:1px;"
+                    f"font-weight:700;margin:8px 0 3px 0;'>"
+                    f"▸ {_TYPE_LABELS.get(_ttype, _ttype)}"
+                    f"<span style='color:#555;font-weight:400;'> ({len(grp)} instruments"
+                    f"{', top ' + str(n_show) + ' shown' if len(grp) > n_show else ''})"
+                    f"</span></div>",
+                    unsafe_allow_html=True,
+                )
+
+                _is_out = (_ttype == "OUT")
+                _row_lbs = [parsed[i][3] for i in top_grp]
+
+                if _is_out:
+                    _col_lbs = ["Range (bps)", "Min (price)", "Max (price)", "Mean (price)", "Std (bps)"]
+                    _data = [
+                        [
+                            f"{bps_rng[i]:.2f}",
+                            f"{stats['min'][i]  / _mult:.4f}",
+                            f"{stats['max'][i]  / _mult:.4f}",
+                            f"{stats['mean'][i] / _mult:.4f}",
+                            f"{bps_std[i]:.2f}",
+                        ]
+                        for i in top_grp
+                    ]
+                else:
+                    _col_lbs = ["Range (bps)", "Min (bps)", "Max (bps)", "Mean (bps)", "Std (bps)"]
+                    _data = [
+                        [
+                            f"{bps_rng[i]:.2f}",
+                            f"{bps_min[i]:.2f}",
+                            f"{bps_max[i]:.2f}",
+                            f"{bps_mean[i]:.2f}",
+                            f"{bps_std[i]:.2f}",
+                        ]
+                        for i in top_grp
+                    ]
+
+                st.markdown(_bps_table(_row_lbs, _col_lbs, _data), unsafe_allow_html=True)
+                grand_total += len(top_grp)
+
+    if grand_total == 0:
+        st.info("No instruments match these filters. Loosen them.")
+    else:
+        st.markdown(
+            f"<small style='color:#666;'>Showing {grand_total:,} rows across all groups "
+            f"(total universe: {len(keys):,} instruments).</small>",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("<hr style='border-color:#222;margin:18px 0;'>", unsafe_allow_html=True)
+
+    # ════════════════════════════════════════════════════════════════════
+    # SECTION 2 — Hedge Finder
+    # ════════════════════════════════════════════════════════════════════
+    bb_subsection("② HEDGE FINDER  —  pick a primary leg, find the best hedges")
+
+    st.markdown(
+        "<small style='color:#888;'>"
+        "<b style='color:#FFB347;'>What it does:</b> for the primary leg you "
+        "pick, the finder scans every other instrument and every coprime "
+        "integer ratio <code>a:b</code>. The winner per hedge is the ratio "
+        "that minimises <code>range(a·primary + b·hedge)</code> in $ across "
+        "your cases. Lower residual range = tighter trade."
+        "</small>",
+        unsafe_allow_html=True,
+    )
+
+    # Min-range gate so user can't accidentally pick a flat primary
+    g1, g2 = st.columns([2, 2])
+    with g1:
+        primary_min_range_bps = st.number_input(
+            "Hide primary candidates with range below (bps)",
+            min_value=0.0, value=1.0, step=0.5,
+            key="range_primary_minrng",
+            help="Trivially-flat legs make terrible primaries — there's "
+                 "nothing to capture. Keep this above 0.",
+        )
+    with g2:
+        primary_prods = st.multiselect(
+            "Restrict primary product",
+            products_all, default=products_all,
+            key="range_primary_prods",
+        )
+
+    eligible = [
+        keys[i] for i in range(len(keys))
+        if bps_rng[i] >= primary_min_range_bps and parsed[i][0] in primary_prods
+    ]
+    if not eligible:
+        st.info("No primary candidates match the min-range filter. Lower it.")
+        return
+
+    # Pre-sort eligible by descending bps range (most volatile first)
+    eligible_sorted = sorted(
+        eligible, key=lambda k: -float(bps_rng[keys.index(k)])
+    )
+    _p_is_out = {k: parsed[keys.index(k)][1] == "OUT" for k in eligible_sorted}
+    label_with_rng = {
+        k: (
+            f"{k}    [range {bps_rng[keys.index(k)]:.2f} bps · "
+            f"price {stats['mean'][keys.index(k)] / MULTIPLIER.get(parsed[keys.index(k)][0], 1.0):.4f}]"
+            if _p_is_out[k]
+            else f"{k}    [range {bps_rng[keys.index(k)]:.2f} bps]"
+        )
+        for k in eligible_sorted
+    }
+    primary_label = st.selectbox(
+        f"Primary leg ({len(eligible_sorted):,} eligible · sorted by range, biggest first)",
+        eligible_sorted,
+        format_func=lambda k: label_with_rng[k],
+        key="range_primary_sel",
+    )
+    if not primary_label:
+        return
+
+    primary_idx  = keys.index(primary_label)
+    p_prod       = parsed[primary_idx][0]
+    p_mult       = MULTIPLIER.get(p_prod, 1.0)
+    p_range      = float(stats["range"][primary_idx])
+    p_range_bps  = float(bps_rng[primary_idx])
+    p_min_bps    = float(bps_min[primary_idx])
+    p_max_bps    = float(bps_max[primary_idx])
+    p_std_bps    = float(bps_std[primary_idx])
+    p_mean_px    = float(stats["mean"][primary_idx]) / p_mult  # price level for display
+
+    _is_out_prim = (parsed[primary_idx][1] == "OUT")
+    if _is_out_prim:
+        _prim_detail = (
+            f"range <b style='color:#FFB347;'>{p_range_bps:.2f} bps</b>  "
+            f"(min {p_min_bps:.2f} bps, max {p_max_bps:.2f} bps, σ {p_std_bps:.2f} bps) "
+            f"· mean price <b style='color:#00B4D8;'>{p_mean_px:.4f}</b>"
+        )
+    else:
+        _prim_detail = (
+            f"range <b style='color:#FFB347;'>{p_range_bps:.2f} bps</b>  "
+            f"(min {p_min_bps:.2f} bps, max {p_max_bps:.2f} bps, σ {p_std_bps:.2f} bps)"
+        )
+    st.markdown(
+        f"<div style='color:#888;font-size:11px;margin-bottom:8px;'>"
+        f"<b>{primary_label}</b> across {matrix.shape[0]:,} cases: "
+        f"{_prim_detail}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    cfg_cols = st.columns(2)
+    with cfg_cols[0]:
+        max_ratio = st.slider(
+            "Max integer ratio per leg", 1, 8, 5,
+            key="range_max_ratio",
+            help="Search a:b in {1..N} × {-N..-1, 1..N}, gcd=1. Bigger N "
+                 "finds tighter exotic ratios but the trade gets harder to fill.",
+        )
+    with cfg_cols[1]:
+        top_k = st.slider(
+            "Show top K hedges", 5, 100, 30,
+            key="range_top_k",
+        )
+
+    hedges = find_best_hedges(primary_idx, matrix, max_ratio=max_ratio, top_k=top_k)
+    if not hedges:
+        st.info("No hedge candidates found.")
+        return
+
+    # ── Top trade card ───────────────────────────────────────────────────
+    best = hedges[0]
+    sign       = "BUY" if best["b"] > 0 else "SELL"
+    sign_color = "#00FF41" if best["b"] > 0 else "#FF3131"
+    a_lots = "lot" if best["a"] == 1 else "lots"
+    b_lots = "lot" if abs(best["b"]) == 1 else "lots"
+
+    st.markdown(
+        f"<div style='border:2px solid #00B4D8;border-radius:4px;"
+        f"padding:12px 16px;margin:8px 0 14px 0;background:#0a1628;'>"
+        f"<div style='color:#FFB347;font-size:11px;letter-spacing:2px;font-weight:700;'>"
+        f"⚡ TOP RANGE-BOUND TRADE</div>"
+        f"<div style='color:#C0C0C0;font-size:13px;margin-top:8px;line-height:1.7;'>"
+        f"&nbsp;<b style='color:#00FF41;'>BUY {best['a']} {a_lots}</b> of "
+        f"<code style='color:#FFB347;background:#000;padding:2px 6px;border-radius:2px;'>"
+        f"{primary_label}</code><br>"
+        f"&nbsp;<b style='color:{sign_color};'>{sign} {abs(best['b'])} {b_lots}</b> of "
+        f"<code style='color:#FFB347;background:#000;padding:2px 6px;border-radius:2px;'>"
+        f"{keys[best['hedge_idx']]}</code></div>"
+        f"<div style='color:#888;font-size:11px;margin-top:8px;'>"
+        f"Residual $ range across {matrix.shape[0]:,} cases: "
+        f"<b style='color:#00B4D8;'>${best['residual_range']:,.0f}</b> "
+        f"(was ${p_range:,.0f}, "
+        f"<b style='color:#00FF41;'>{best['reduction_pct']:.1f}% reduction</b>)"
+        f"</div></div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── Full hedge table ─────────────────────────────────────────────────
+    html = '<div class="bb-table-wrap"><table class="bb-table"><thead><tr>'
+    html += '<th>#</th><th>Hedge instrument</th><th>Action</th><th>Ratio (P : H)</th>'
+    html += '<th>Residual $ range</th><th>% reduction</th><th>Min $</th><th>Max $</th>'
+    html += '</tr></thead><tbody>'
+    for rank, h in enumerate(hedges, start=1):
+        s_color = "#00FF41" if h["b"] > 0 else "#FF3131"
+        s_text  = "BUY" if h["b"] > 0 else "SELL"
+        red_class = "pos-val" if h["reduction_pct"] > 0 else "neg-val"
+        html += '<tr>'
+        html += f'<td style="color:#888;text-align:center;">{rank}</td>'
+        html += f'<td class="bb-row-label">{keys[h["hedge_idx"]]}</td>'
+        html += f'<td style="color:{s_color};font-weight:700;text-align:center;">{s_text}</td>'
+        html += f'<td style="text-align:center;">{h["a"]} : {abs(h["b"])}</td>'
+        html += f'<td>${h["residual_range"]:,.0f}</td>'
+        html += f'<td class="{red_class}">{h["reduction_pct"]:+.1f}%</td>'
+        html += f'<td>${h["residual_min"]:,.0f}</td>'
+        html += f'<td>${h["residual_max"]:,.0f}</td>'
+        html += '</tr>'
+    html += '</tbody></table></div>'
+    st.markdown(html, unsafe_allow_html=True)
+
+    st.markdown("<hr style='border-color:#222;margin:18px 0;'>", unsafe_allow_html=True)
+
+    # ════════════════════════════════════════════════════════════════════
+    # SECTION 3 — Trade Inspector
+    # ════════════════════════════════════════════════════════════════════
+    bb_subsection("③ TRADE INSPECTOR  —  PnL distribution across cases")
+
+    st.markdown(
+        "<small style='color:#888;'>"
+        "Pick any hedge from the table above (or override the ratio yourself). "
+        "Below is the combo's $ value in every case. <b>If you enter at the "
+        "mean, your worst-case PnL is <i>min − mean</i>, best-case is "
+        "<i>max − mean</i>.</b> The tighter the histogram, the safer the trade."
+        "</small>",
+        unsafe_allow_html=True,
+    )
+
+    insp_cols = st.columns([3, 1, 1])
+    with insp_cols[0]:
+        # Default to top hedge; user can switch
+        hedge_options = [
+            (i, f"#{i+1}  {keys[h['hedge_idx']]}  "
+                 f"({'BUY' if h['b']>0 else 'SELL'} {h['a']}:{abs(h['b'])} · "
+                 f"residual ${h['residual_range']:,.0f})")
+            for i, h in enumerate(hedges)
+        ]
+        sel_idx = st.selectbox(
+            "Hedge to inspect (default = #1, the top trade)",
+            options=[i for i, _ in hedge_options],
+            format_func=lambda i: hedge_options[i][1],
+            key="range_inspect_idx",
+        )
+    chosen = hedges[sel_idx]
+    default_a, default_b = chosen["a"], chosen["b"]
+    with insp_cols[1]:
+        a_user = st.number_input(
+            "Override a (primary lots)", value=int(default_a),
+            min_value=-20, max_value=20, step=1,
+            key="range_a_override",
+        )
+    with insp_cols[2]:
+        b_user = st.number_input(
+            "Override b (hedge lots, signed)", value=int(default_b),
+            min_value=-20, max_value=20, step=1,
+            key="range_b_override",
+        )
+
+    if a_user == 0 and b_user == 0:
+        st.warning("Both lots are zero — pick non-zero ratios to inspect a trade.")
+        return
+
+    p_vec = matrix[:, primary_idx]
+    h_vec = matrix[:, chosen["hedge_idx"]]
+    combo = a_user * p_vec + b_user * h_vec
+
+    c_min  = float(combo.min())
+    c_max  = float(combo.max())
+    c_mean = float(combo.mean())
+    c_std  = float(combo.std(ddof=0))
+    c_rng  = c_max - c_min
+
+    # PnL if entered at mean
+    pnl_worst = c_min - c_mean
+    pnl_best  = c_max - c_mean
+
+    # Direction summary
+    a_dir = "BUY" if a_user > 0 else "SELL"
+    b_dir = "BUY" if b_user > 0 else "SELL"
+
+    st.markdown(
+        f"<div style='border-left:3px solid #FF8C00;padding:8px 14px;margin:8px 0;background:#0d0a04;'>"
+        f"<div style='color:#FFB347;font-size:11px;letter-spacing:1px;'>YOUR TRADE</div>"
+        f"<div style='color:#C0C0C0;font-size:12px;margin-top:4px;line-height:1.6;'>"
+        f"<b style='color:{'#00FF41' if a_user>0 else '#FF3131'};'>"
+        f"{a_dir} {abs(a_user)} {'lot' if abs(a_user)==1 else 'lots'}</b> of "
+        f"<code style='color:#FFB347;'>{primary_label}</code><br>"
+        f"<b style='color:{'#00FF41' if b_user>0 else '#FF3131'};'>"
+        f"{b_dir} {abs(b_user)} {'lot' if abs(b_user)==1 else 'lots'}</b> of "
+        f"<code style='color:#FFB347;'>{keys[chosen['hedge_idx']]}</code>"
+        f"</div></div>",
+        unsafe_allow_html=True,
+    )
+
+    # Stats strip
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("MEAN $",  f"${c_mean:,.0f}")
+    m2.metric("STD $",   f"${c_std:,.0f}")
+    m3.metric("MIN $",   f"${c_min:,.0f}")
+    m4.metric("MAX $",   f"${c_max:,.0f}")
+    m5.metric("RANGE $", f"${c_rng:,.0f}")
+
+    # PnL summary
+    st.markdown(
+        f"<div style='border:1px solid #333;border-radius:3px;padding:10px 14px;"
+        f"background:#050505;margin:10px 0;'>"
+        f"<div style='color:#FFB347;font-size:11px;letter-spacing:1px;font-weight:700;'>"
+        f"📊 PnL IF YOU ENTER AT THE MEAN (${c_mean:,.0f})</div>"
+        f"<table style='width:100%;margin-top:6px;font-size:12px;'>"
+        f"<tr><td style='color:#888;'>Worst-case PnL across cases:</td>"
+        f"<td style='color:#FF3131;font-weight:700;text-align:right;'>${pnl_worst:,.0f}</td></tr>"
+        f"<tr><td style='color:#888;'>Best-case PnL across cases:</td>"
+        f"<td style='color:#00FF41;font-weight:700;text-align:right;'>${pnl_best:,.0f}</td></tr>"
+        f"<tr><td style='color:#888;'>PnL spread (range):</td>"
+        f"<td style='color:#00B4D8;font-weight:700;text-align:right;'>${c_rng:,.0f}</td></tr>"
+        f"</table>"
+        f"<div style='color:#666;font-size:10px;margin-top:6px;'>"
+        f"To capture edge, compare live mid of this combo against ${c_mean:,.0f}. "
+        f"If live &lt; mean, BUY — expected payoff to mean = (mean − live). "
+        f"If live &gt; mean, SELL — expected payoff = (live − mean)."
+        f"</div></div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── Histogram of combo values per case ──────────────────────────────
+    fig = go.Figure()
+    fig.add_trace(go.Histogram(
+        x=combo,
+        nbinsx=min(60, max(10, matrix.shape[0] // 20)),
+        marker_color="#00B4D8",
+        marker_line_color="#0a1628",
+        marker_line_width=1,
+        opacity=0.85,
+        name="Combo $ value per case",
+    ))
+    fig.add_vline(
+        x=c_mean, line_color="#FFB347", line_dash="dash", line_width=2,
+        annotation_text=f"Mean ${c_mean:,.0f}",
+        annotation_position="top",
+        annotation_font=dict(color="#FFB347", size=10),
+    )
+    fig.add_vline(x=c_min, line_color="#FF3131", line_width=1)
+    fig.add_vline(x=c_max, line_color="#00FF41", line_width=1)
+    fig.update_layout(
+        template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)", height=320,
+        margin=dict(l=50, r=20, t=30, b=40),
+        xaxis=dict(title="Combo value ($)", showgrid=True, gridcolor="#222",
+                   tickformat="$,.0f", title_font=dict(size=10)),
+        yaxis=dict(title="# cases", showgrid=True, gridcolor="#222",
+                   title_font=dict(size=10)),
+        showlegend=False,
+    )
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+    # ── Per-case combo value table (optional, capped) ───────────────────
+    with st.expander(
+        f"📋 Per-case combo values ({matrix.shape[0]:,} cases — sorted)", expanded=False,
+    ):
+        sort_choice = st.radio(
+            "Sort", ["Best PnL → Worst", "Worst PnL → Best", "Case order"],
+            horizontal=True, key="range_inspect_sort",
+        )
+        case_names = [c.get("name", c.get("id", f"case_{i}")) for i, c in enumerate(cm.cases)]
+        pnls = combo - c_mean  # PnL if entry at mean
+        if sort_choice.startswith("Best"):
+            order_p = np.argsort(-pnls)
+        elif sort_choice.startswith("Worst"):
+            order_p = np.argsort(pnls)
+        else:
+            order_p = np.arange(len(case_names))
+
+        # Cap at 200 rows for browser sanity
+        order_p = order_p[:200]
+        rows_html = []
+        for rank, i in enumerate(order_p, start=1):
+            pnl = float(pnls[i])
+            color = "#00FF41" if pnl > 0 else ("#FF3131" if pnl < 0 else "#888")
+            rows_html.append(
+                f"<tr><td style='color:#666;text-align:right;padding:2px 8px;'>{rank}</td>"
+                f"<td style='color:#C0C0C0;padding:2px 8px;'>{case_names[i]}</td>"
+                f"<td style='text-align:right;padding:2px 8px;'>${combo[i]:,.0f}</td>"
+                f"<td style='color:{color};font-weight:700;text-align:right;padding:2px 8px;'>"
+                f"${pnl:+,.0f}</td></tr>"
+            )
+        st.markdown(
+            "<div class='bb-table-wrap'><table class='bb-table'>"
+            "<thead><tr><th>#</th><th>Case</th><th>Combo $</th><th>PnL vs mean</th></tr></thead>"
+            f"<tbody>{''.join(rows_html)}</tbody></table></div>",
+            unsafe_allow_html=True,
+        )
