@@ -387,6 +387,43 @@ def render_case_builder(cm) -> None:
 
 MAX_BULK_CASES = 5000
 
+# ── Correlated Cascade — Historical Spillover Profiles ────────────────────────
+# Coefficients are: Y+1, Y+2, Y+3, Y+4.
+# Example: if anchor year gets -100bp and coeff for Y+1 = 0.8, then Y+1 gets -80bp.
+# Derived from Fed rate cycle analysis 2015-2025.
+CASCADE_PROFILES = {
+    "Momentum": {
+        "description": "Cuts/hikes continue in the same direction, fading gradually. "
+                       "Based on 2015-2018 hiking cycle & 2024-2025 easing.",
+        "coeffs": [0.80, 0.50, 0.20, 0.00],
+        "icon": "🚀",
+    },
+    "Front-Loaded": {
+        "description": "Most of the action is in the anchor year, little follow-through. "
+                       "Based on 2019 insurance cuts (quick adjustment, then hold).",
+        "coeffs": [0.40, 0.15, 0.00, 0.00],
+        "icon": "⚡",
+    },
+    "Mean-Revert": {
+        "description": "Outer years partially reverse the anchor move. "
+                       "Based on 2018 peak → 2019 reversal pattern.",
+        "coeffs": [0.50, 0.10, -0.20, -0.15],
+        "icon": "🔄",
+    },
+    "Shock + Fade": {
+        "description": "Y+1 amplifies the anchor (panic/crisis), then fades & reverses. "
+                       "Based on 2020 COVID response (emergency cuts → slow recovery).",
+        "coeffs": [1.30, 0.25, -0.10, -0.10],
+        "icon": "💥",
+    },
+    "Gradual Norm.": {
+        "description": "Slow, steady continuation that tapers gently. "
+                       "Based on 2015-2017 post-GFC normalization.",
+        "coeffs": [0.60, 0.40, 0.25, 0.10],
+        "icon": "📐",
+    },
+}
+
 
 def _bps_range(bmin: float, bmax: float, step: float) -> list[float]:
     """Inclusive bps range, sorted low→high. Returns [bmin] if step <= 0."""
@@ -520,8 +557,59 @@ def _build_bulk_specs(
     return specs
 
 
+def _build_cascade_specs(
+    prefix: str,
+    anchor_year: str,
+    anchor_cuts: list[float],
+    coeffs: list[float],
+    formula_name: str,
+    offsets: dict[str, float],
+    base_sofr: float,
+    base_effr: float,
+) -> list[dict]:
+    """
+    Correlated Cascade: sweep anchor year from min→max, propagate to other
+    years via spillover coefficients.
+
+    coeffs:  [Y+1, Y+2, Y+3, Y+4] — multiplier of anchor cut for each
+             subsequent year.
+    offsets: {year_str: fixed_bps} — added AFTER cascade multiplication.
+    """
+    all_years = sorted(str(y) for y in _years())
+    anchor_idx = all_years.index(anchor_year)
+
+    # Map each non-anchor year to its coefficient index
+    # Years BEFORE anchor get reverse-indexed: Y-1 uses coeffs[0], Y-2 uses coeffs[1], etc.
+    # Years AFTER anchor get forward-indexed: Y+1 uses coeffs[0], Y+2 uses coeffs[1], etc.
+    year_coeff_map: dict[str, float] = {}
+    for i, ys in enumerate(all_years):
+        if ys == anchor_year:
+            continue
+        distance = abs(i - anchor_idx)
+        ci = distance - 1  # coeffs[0]=Y±1, coeffs[1]=Y±2, …
+        year_coeff_map[ys] = coeffs[ci] if ci < len(coeffs) else 0.0
+
+    specs: list[dict] = []
+    for seq, anchor_bps in enumerate(anchor_cuts, start=1):
+        year_configs = {}
+        for ys in all_years:
+            if ys == anchor_year:
+                cut = float(anchor_bps)
+            else:
+                c = year_coeff_map.get(ys, 0.0)
+                cut = round(float(anchor_bps) * c + offsets.get(ys, 0.0), 2)
+            year_configs[ys] = {
+                "mode": "annual",
+                "annual_cut": cut,
+                "formula_name": formula_name,
+            }
+        specs.append(_spec_from_year_configs(seq, prefix, year_configs, base_sofr, base_effr))
+    return specs
+
+
+
 def render_bulk_generator(cm) -> None:
-    """Bulk case generator with two modes: cartesian (multiply) or additive (sum)."""
+    """Bulk case generator with three modes: cartesian, additive, or correlated cascade."""
     with st.expander("🎲 BULK CASE GENERATOR", expanded=False):
         st.markdown(
             "<small style='color:#888'>"
@@ -543,178 +631,341 @@ def render_bulk_generator(cm) -> None:
             options=[
                 "Cartesian (multiply across years)",
                 "Additive (one year at a time)",
+                "Correlated Cascade (anchor + spillover)",
             ],
             key="bulk_gen_mode",
             horizontal=False,
             help=(
-                "Cartesian: every combination of every year. 7 × 3 × 5 × 2 = 210.\n"
-                "Additive: vary one year, hold others at 0. 7 + 3 + 5 + 2 + 1 = 18 "
-                "(includes the all-hold baseline)."
+                "Cartesian: every combination of every year.\n"
+                "Additive: vary one year, hold others at 0.\n"
+                "Cascade: sweep one anchor year, other years follow via "
+                "historically-derived spillover coefficients."
             ),
         )
-        gen_mode = "cartesian" if mode_label.startswith("Cartesian") else "additive"
+        if mode_label.startswith("Cartesian"):
+            gen_mode = "cartesian"
+        elif mode_label.startswith("Additive"):
+            gen_mode = "additive"
+        else:
+            gen_mode = "cascade"
 
-        if gen_mode == "cartesian":
-            st.markdown(
+        _mode_blurbs = {
+            "cartesian": (
                 "<small style='color:#FFB347;'>"
                 "✱ Cartesian: <b>N₂₀₂₆ × N₂₀₂₇ × N₂₀₂₈ × …</b> — "
-                "every combo of every year. Grows fast."
-                "</small>",
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
+                "every combo of every year. Grows fast.</small>"
+            ),
+            "additive": (
                 "<small style='color:#00FF41;'>"
                 "✱ Additive: <b>N₂₀₂₆ + N₂₀₂₇ + N₂₀₂₈ + …</b> + 1 baseline — "
-                "for each year-variant, all other years are held at 0. "
-                "Use this to isolate each year's impact."
-                "</small>",
-                unsafe_allow_html=True,
-            )
+                "for each year-variant, all other years are held at 0.</small>"
+            ),
+            "cascade": (
+                "<small style='color:#00B4D8;'>"
+                "✱ Cascade: sweep an <b>anchor year</b>'s cuts, other years react "
+                "via spillover coefficients derived from <b>10 years of Fed history</b> "
+                "(2015-2025). All 5 years move together coherently.</small>"
+            ),
+        }
+        st.markdown(_mode_blurbs[gen_mode], unsafe_allow_html=True)
 
         formula_names = cm.get_formula_names()
         if not formula_names:
             st.warning("No formulas defined — add some in the Formula Builder first.")
             return
 
-        st.markdown(
-            "<div style='color:#FF8C00;font-size:11px;letter-spacing:1px;"
-            "margin:10px 0 4px 0;'>PER-YEAR RANGES &amp; FORMULAS</div>"
-            "<small style='color:#666'>Negative bps = cut. Uncheck a year to "
-            "hold it at 0.</small>",
-            unsafe_allow_html=True,
-        )
-
-        per_year: dict[str, dict] = {}
-
-        for y in _years():
-            year_str = str(y)
-
-            hc1, hc2 = st.columns([3, 1])
-            with hc1:
-                st.markdown(
-                    f"<div style='color:#FF8C00;font-size:10px;font-weight:600;"
-                    f"border-top:1px solid #1a1a1a;padding-top:6px;margin-top:6px;'>"
-                    f"📅 {y}</div>",
-                    unsafe_allow_html=True,
-                )
-            with hc2:
-                # Default: vary 2026 & 2027, hold the rest at 0.
-                enabled = st.checkbox(
-                    "Vary", value=(y in (2026, 2027)),
-                    key=f"bulk_enable_{y}",
-                )
-
-            if not enabled:
-                per_year[year_str] = {"cuts": [0.0], "formulas": [formula_names[0]]}
-                st.markdown(
-                    "<small style='color:#555;margin-left:6px;'>held at 0 bps</small>",
-                    unsafe_allow_html=True,
-                )
-                continue
-
-            r1, r2, r3, r4 = st.columns(4)
-            with r1:
-                bmin = st.number_input(
-                    "Min bps", value=-30.0, step=2.5, format="%.1f",
-                    key=f"bulk_min_{y}",
-                )
-            with r2:
-                bmax = st.number_input(
-                    "Max bps", value=0.0, step=2.5, format="%.1f",
-                    key=f"bulk_max_{y}",
-                )
-            with r3:
-                step = st.number_input(
-                    "Step", value=5.0, step=0.5, format="%.1f",
-                    min_value=0.5, key=f"bulk_step_{y}",
-                )
-            with r4:
-                cuts = _bps_range(bmin, bmax, step)
-                st.markdown(
-                    f"<div style='color:#FFB347;font-size:11px;padding-top:26px;'>"
-                    f"{len(cuts)} cut levels</div>",
-                    unsafe_allow_html=True,
-                )
-
-            default_fml = ["Uniform"] if "Uniform" in formula_names else formula_names[:1]
+        # ==================================================================
+        # CASCADE UI
+        # ==================================================================
+        if gen_mode == "cascade":
             st.markdown(
-                f"<div style='color:#4fc3f7;font-size:10px;letter-spacing:1px;"
-                f"font-weight:700;margin:6px 0 -4px 0;'>"
-                f"📐 FORMULAS TO PERMUTE FOR {y} "
-                f"<span style='color:#888;font-weight:400;'>"
-                f"({len(formula_names)} available — pick any subset)</span>"
-                f"</div>",
+                "<div style='color:#FF8C00;font-size:11px;letter-spacing:1px;"
+                "margin:10px 0 4px 0;'>CORRELATED CASCADE SETTINGS</div>"
+                "<small style='color:#666'>Sweep one anchor year. Other years "
+                "follow via spillover coefficients from historical Fed cycles."
+                "</small>",
                 unsafe_allow_html=True,
             )
-            fmls = st.multiselect(
-                f"Formulas to permute · {y}",
-                options=formula_names,
-                default=default_fml,
-                key=f"bulk_fml_{y}",
-                label_visibility="collapsed",
-                placeholder=f"Pick formulas to combine with the cut range for {y}…",
-            )
-            if not fmls:
-                fmls = default_fml
+            years_list = _years()
+            cc1, cc2 = st.columns(2)
+            with cc1:
+                anchor_year = st.selectbox(
+                    "Anchor Year", years_list, index=0, key="casc_anchor",
+                )
+            with cc2:
+                casc_formula = st.selectbox(
+                    "Formula (all years)", formula_names, key="casc_formula",
+                )
+            cr1, cr2, cr3 = st.columns(3)
+            with cr1:
+                casc_min = st.number_input(
+                    "Anchor Min bps", value=-100.0, step=12.5,
+                    format="%.1f", key="casc_min",
+                )
+            with cr2:
+                casc_max = st.number_input(
+                    "Anchor Max bps", value=25.0, step=12.5,
+                    format="%.1f", key="casc_max",
+                )
+            with cr3:
+                casc_step = st.number_input(
+                    "Step", value=12.5, step=2.5, format="%.1f",
+                    min_value=0.5, key="casc_step",
+                )
+            anchor_cuts = _bps_range(casc_min, casc_max, casc_step)
 
-            n_unique = len(_year_unique_options(cuts, fmls))
+            # Profile picker
             st.markdown(
-                f"<small style='color:#888;'>"
-                f"{len(cuts)} cuts × {len(fmls)} formulas = "
-                f"<b style='color:#FFB347;'>{n_unique}</b> unique year-variants"
-                f"{' (0-cut de-duplicated)' if 0 in cuts and len(fmls) > 1 else ''}"
-                f"</small>",
+                "<div style='color:#00B4D8;font-size:11px;letter-spacing:1px;"
+                "font-weight:700;margin:12px 0 4px 0;'>"
+                "📊 SPILLOVER PROFILE  (from 2015-2025 Fed history)</div>",
                 unsafe_allow_html=True,
             )
+            profile_names = list(CASCADE_PROFILES.keys()) + ["Custom"]
+            profile_sel = st.selectbox(
+                "Profile", profile_names, key="casc_profile",
+                format_func=lambda n: (
+                    f"{CASCADE_PROFILES[n]['icon']} {n}"
+                    if n in CASCADE_PROFILES
+                    else "✏️ Custom"
+                ),
+            )
+            if profile_sel != "Custom":
+                prof = CASCADE_PROFILES[profile_sel]
+                coeffs = prof["coeffs"][:]
+                st.markdown(
+                    f"<small style='color:#888;'>{prof['description']}</small>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                coeffs = [0.5, 0.2, 0.0, 0.0]
 
-            per_year[year_str] = {"cuts": cuts, "formulas": fmls}
+            # Editable coefficient sliders
+            st.markdown(
+                "<div style='color:#FFB347;font-size:10px;letter-spacing:1px;"
+                "margin:10px 0 2px 0;'>SPILLOVER COEFFICIENTS</div>",
+                unsafe_allow_html=True,
+            )
+            sc1, sc2, sc3, sc4 = st.columns(4)
+            with sc1:
+                coeffs[0] = st.number_input(
+                    "Y±1", value=float(coeffs[0]), step=0.05,
+                    min_value=-2.0, max_value=2.0, format="%.2f", key="casc_c0",
+                )
+            with sc2:
+                coeffs[1] = st.number_input(
+                    "Y±2", value=float(coeffs[1]), step=0.05,
+                    min_value=-2.0, max_value=2.0, format="%.2f", key="casc_c1",
+                )
+            with sc3:
+                coeffs[2] = st.number_input(
+                    "Y±3", value=float(coeffs[2]), step=0.05,
+                    min_value=-2.0, max_value=2.0, format="%.2f", key="casc_c2",
+                )
+            with sc4:
+                coeffs[3] = st.number_input(
+                    "Y±4", value=float(coeffs[3]), step=0.05,
+                    min_value=-2.0, max_value=2.0, format="%.2f", key="casc_c3",
+                )
 
-        # ── Total estimate ───────────────────────────────────────────────────
-        per_year_counts = [
-            max(1, len(_year_unique_options(cfg["cuts"], cfg["formulas"])))
-            for cfg in per_year.values()
-        ]
-        if gen_mode == "cartesian":
-            total = 1
-            for n in per_year_counts:
-                total *= n
-            math_str = " × ".join(str(n) for n in per_year_counts) + f" = {total:,}"
+            # Preview table
+            anchor_str = str(anchor_year)
+            all_ys = sorted(str(y) for y in years_list)
+            anch_i = all_ys.index(anchor_str)
+            prev_html = (
+                "<div style='margin:10px 0;'>"
+                "<div style='color:#00B4D8;font-size:10px;letter-spacing:1px;"
+                "margin-bottom:4px;'>CASCADE PREVIEW</div>"
+                "<table style='width:100%;border-collapse:collapse;font-size:11px;'>"
+                "<thead><tr><th style='color:#FF6600;padding:3px 6px;"
+                "border-bottom:1px solid #333;text-align:left;'>Anchor</th>"
+            )
+            for ys in all_ys:
+                tag = " ⚓" if ys == anchor_str else ""
+                prev_html += (
+                    f"<th style='color:#FF6600;padding:3px 6px;"
+                    f"border-bottom:1px solid #333;text-align:right;'>{ys}{tag}</th>"
+                )
+            prev_html += "</tr></thead><tbody>"
+            for av in anchor_cuts[:5]:
+                prev_html += (
+                    f"<tr><td style='color:#FFB347;padding:2px 6px;"
+                    f"font-weight:700;'>{av:+.1f}bp</td>"
+                )
+                for i_y, ys in enumerate(all_ys):
+                    if ys == anchor_str:
+                        v = av
+                    else:
+                        ci = abs(i_y - anch_i) - 1
+                        c = coeffs[ci] if ci < len(coeffs) else 0.0
+                        v = round(av * c, 2)
+                    clr = "#00FF41" if v < 0 else ("#FF3131" if v > 0 else "#555")
+                    prev_html += (
+                        f"<td style='color:{clr};text-align:right;"
+                        f"padding:2px 6px;'>{v:+.1f}</td>"
+                    )
+                prev_html += "</tr>"
+            if len(anchor_cuts) > 5:
+                prev_html += (
+                    f"<tr><td colspan='{len(all_ys)+1}' style='color:#555;"
+                    f"font-size:10px;padding:2px 6px;'>… {len(anchor_cuts)-5} more</td></tr>"
+                )
+            prev_html += "</tbody></table></div>"
+            st.markdown(prev_html, unsafe_allow_html=True)
+
+            # Per-year offsets
+            with st.expander("🔧 Per-year offsets (optional bias)", expanded=False):
+                st.markdown(
+                    "<small style='color:#666;'>Fixed bps bias added after cascade. "
+                    "E.g. +10bp in 2029 for inflation persistence.</small>",
+                    unsafe_allow_html=True,
+                )
+                casc_offsets: dict[str, float] = {}
+                off_cols = st.columns(len(years_list))
+                for ic, y in enumerate(years_list):
+                    with off_cols[ic]:
+                        ov = st.number_input(
+                            str(y), value=0.0, step=5.0, format="%.1f",
+                            key=f"casc_off_{y}",
+                        )
+                        if ov != 0:
+                            casc_offsets[str(y)] = ov
+
+            total = len(anchor_cuts)
+            math_str = f"{total} anchor steps"
+
+        # ==================================================================
+        # CARTESIAN / ADDITIVE UI  (original)
+        # ==================================================================
         else:
-            # additive: sum of (non-zero variants per year) + 1 baseline
-            non_zero_per_year = []
-            for cfg in per_year.values():
-                opts = _year_unique_options(cfg["cuts"], cfg["formulas"])
-                non_zero_per_year.append(sum(1 for c, _ in opts if c != 0))
-            total = sum(non_zero_per_year) + 1
-            math_str = " + ".join(str(n) for n in non_zero_per_year) + f" + 1 = {total:,}"
+            st.markdown(
+                "<div style='color:#FF8C00;font-size:11px;letter-spacing:1px;"
+                "margin:10px 0 4px 0;'>PER-YEAR RANGES &amp; FORMULAS</div>"
+                "<small style='color:#666'>Negative bps = cut. Uncheck a year to "
+                "hold it at 0.</small>",
+                unsafe_allow_html=True,
+            )
+            per_year: dict[str, dict] = {}
+            for y in _years():
+                year_str = str(y)
+                hc1, hc2 = st.columns([3, 1])
+                with hc1:
+                    st.markdown(
+                        f"<div style='color:#FF8C00;font-size:10px;font-weight:600;"
+                        f"border-top:1px solid #1a1a1a;padding-top:6px;margin-top:6px;'>"
+                        f"📅 {y}</div>",
+                        unsafe_allow_html=True,
+                    )
+                with hc2:
+                    enabled = st.checkbox(
+                        "Vary", value=(y in (2026, 2027)),
+                        key=f"bulk_enable_{y}",
+                    )
+                if not enabled:
+                    per_year[year_str] = {"cuts": [0.0], "formulas": [formula_names[0]]}
+                    st.markdown(
+                        "<small style='color:#555;margin-left:6px;'>held at 0 bps</small>",
+                        unsafe_allow_html=True,
+                    )
+                    continue
+                r1, r2, r3, r4 = st.columns(4)
+                with r1:
+                    bmin = st.number_input(
+                        "Min bps", value=-30.0, step=2.5, format="%.1f",
+                        key=f"bulk_min_{y}",
+                    )
+                with r2:
+                    bmax = st.number_input(
+                        "Max bps", value=0.0, step=2.5, format="%.1f",
+                        key=f"bulk_max_{y}",
+                    )
+                with r3:
+                    step = st.number_input(
+                        "Step", value=5.0, step=0.5, format="%.1f",
+                        min_value=0.5, key=f"bulk_step_{y}",
+                    )
+                with r4:
+                    cuts = _bps_range(bmin, bmax, step)
+                    st.markdown(
+                        f"<div style='color:#FFB347;font-size:11px;padding-top:26px;'>"
+                        f"{len(cuts)} cut levels</div>",
+                        unsafe_allow_html=True,
+                    )
+                default_fml = ["Uniform"] if "Uniform" in formula_names else formula_names[:1]
+                st.markdown(
+                    f"<div style='color:#4fc3f7;font-size:10px;letter-spacing:1px;"
+                    f"font-weight:700;margin:6px 0 -4px 0;'>"
+                    f"📐 FORMULAS TO PERMUTE FOR {y} "
+                    f"<span style='color:#888;font-weight:400;'>"
+                    f"({len(formula_names)} available — pick any subset)</span></div>",
+                    unsafe_allow_html=True,
+                )
+                fmls = st.multiselect(
+                    f"Formulas to permute · {y}",
+                    options=formula_names,
+                    default=default_fml,
+                    key=f"bulk_fml_{y}",
+                    label_visibility="collapsed",
+                    placeholder=f"Pick formulas to combine with the cut range for {y}…",
+                )
+                if not fmls:
+                    fmls = default_fml
+                n_unique = len(_year_unique_options(cuts, fmls))
+                st.markdown(
+                    f"<small style='color:#888;'>"
+                    f"{len(cuts)} cuts × {len(fmls)} formulas = "
+                    f"<b style='color:#FFB347;'>{n_unique}</b> unique year-variants"
+                    f"{'  (0-cut de-duplicated)' if 0 in cuts and len(fmls) > 1 else ''}"
+                    f"</small>",
+                    unsafe_allow_html=True,
+                )
+                per_year[year_str] = {"cuts": cuts, "formulas": fmls}
 
+            # Total estimate
+            per_year_counts = [
+                max(1, len(_year_unique_options(cfg["cuts"], cfg["formulas"])))
+                for cfg in per_year.values()
+            ]
+            if gen_mode == "cartesian":
+                total = 1
+                for n in per_year_counts:
+                    total *= n
+                math_str = " × ".join(str(n) for n in per_year_counts) + f" = {total:,}"
+            else:
+                non_zero_per_year = []
+                for cfg in per_year.values():
+                    opts = _year_unique_options(cfg["cuts"], cfg["formulas"])
+                    non_zero_per_year.append(sum(1 for c, _ in opts if c != 0))
+                total = sum(non_zero_per_year) + 1
+                math_str = " + ".join(str(n) for n in non_zero_per_year) + f" + 1 = {total:,}"
+
+        # ==================================================================
+        # SHARED: total display + buttons
+        # ==================================================================
         if total > MAX_BULK_CASES:
             color, warn = "#FF3131", f" ⚠ EXCEEDS LIMIT ({MAX_BULK_CASES:,})"
         elif total > 1000:
-            color, warn = "#FFB347", " (large batch — generation may take a few seconds)"
+            color, warn = "#FFB347", " (large batch)"
         else:
             color, warn = "#00FF41", ""
 
+        _sym = {"cartesian": "∏", "additive": "Σ", "cascade": "⟿"}[gen_mode]
         st.markdown(
             f"<div style='color:#888;font-size:11px;margin-top:6px;'>"
-            f"<span style='color:#4fc3f7;'>{'∏' if gen_mode == 'cartesian' else 'Σ'}</span> "
+            f"<span style='color:#4fc3f7;'>{_sym}</span> "
             f"<span style='font-family:monospace;color:#FFB347;'>{math_str}</span>"
             f"</div>",
             unsafe_allow_html=True,
         )
-
         st.markdown(
             f"<div style='border-top:1px solid #333;padding-top:8px;margin-top:10px;'>"
             f"<span style='color:#888;font-size:11px;letter-spacing:1px;'>"
             f"ESTIMATED TOTAL CASES: </span>"
             f"<span style='color:{color};font-size:16px;font-weight:700;'>{total:,}</span>"
-            f"<span style='color:{color};font-size:10px;'>{warn}</span>"
-            f"</div>",
+            f"<span style='color:{color};font-size:10px;'>{warn}</span></div>",
             unsafe_allow_html=True,
         )
 
-        # ── Action buttons ───────────────────────────────────────────────────
         cb1, cb2 = st.columns([1, 1])
         with cb1:
             preview = st.button(
@@ -730,21 +981,27 @@ def render_bulk_generator(cm) -> None:
         sofr = st.session_state.get("base_sofr", 3.64)
         effr = st.session_state.get("base_effr", 3.64)
 
-        if preview:
-            specs = _build_bulk_specs(prefix, per_year, sofr, effr, gen_mode)
-            sample_n = min(8, len(specs))
-            st.code(
-                "\n".join(s["name"] for s in specs[:sample_n]) +
-                (f"\n... ({len(specs) - sample_n} more)" if len(specs) > sample_n else ""),
-                language=None,
-            )
+        if preview or generate:
+            if gen_mode == "cascade":
+                specs = _build_cascade_specs(
+                    prefix, str(anchor_year), anchor_cuts, coeffs,
+                    casc_formula, casc_offsets, sofr, effr,
+                )
+            else:
+                specs = _build_bulk_specs(prefix, per_year, sofr, effr, gen_mode)
 
-        if generate:
-            specs = _build_bulk_specs(prefix, per_year, sofr, effr, gen_mode)
-            with st.spinner(f"Building {len(specs):,} cases..."):
-                added = cm.bulk_add_cases(specs)
-            st.success(f"✅ Generated {added:,} cases (total now: {len(cm.cases):,})")
-            st.rerun()
+            if preview:
+                sample_n = min(8, len(specs))
+                st.code(
+                    "\n".join(s["name"] for s in specs[:sample_n]) +
+                    (f"\n... ({len(specs) - sample_n} more)" if len(specs) > sample_n else ""),
+                    language=None,
+                )
+            if generate:
+                with st.spinner(f"Building {len(specs):,} cases..."):
+                    added = cm.bulk_add_cases(specs)
+                st.success(f"✅ Generated {added:,} cases (total now: {len(cm.cases):,})")
+                st.rerun()
 
 
 # ── Case List ─────────────────────────────────────────────────────────────────
