@@ -422,6 +422,18 @@ CASCADE_PROFILES = {
         "coeffs": [0.60, 0.40, 0.25, 0.10],
         "icon": "📐",
     },
+    "Zig-Zag Cycle": {
+        "description": "Anchor year cuts → next year hikes → then cuts again. "
+                       "Alternating direction. Based on stop-start tightening cycles.",
+        "coeffs": [-0.50, 0.30, -0.20, 0.10],
+        "icon": "📈",
+    },
+    "Overshoot+Correct": {
+        "description": "Y+1 overshoots in same direction, then hard reversal in Y+2/Y+3. "
+                       "Based on 2020-2022 pattern (deep cuts → aggressive hikes).",
+        "coeffs": [1.20, -0.60, -0.30, 0.10],
+        "icon": "⚖️",
+    },
 }
 
 
@@ -562,7 +574,7 @@ def _build_cascade_specs(
     anchor_year: str,
     anchor_cuts: list[float],
     coeffs: list[float],
-    formula_name: str,
+    year_formulas: dict[str, str],
     offsets: dict[str, float],
     base_sofr: float,
     base_effr: float,
@@ -571,22 +583,22 @@ def _build_cascade_specs(
     Correlated Cascade: sweep anchor year from min→max, propagate to other
     years via spillover coefficients.
 
-    coeffs:  [Y+1, Y+2, Y+3, Y+4] — multiplier of anchor cut for each
-             subsequent year.
-    offsets: {year_str: fixed_bps} — added AFTER cascade multiplication.
+    coeffs:        [Y+1, Y+2, Y+3, Y+4] — multiplier of anchor cut.
+                   Negative = opposite direction (cuts become hikes).
+    year_formulas: {year_str: formula_name} — per-year distribution formula.
+    offsets:       {year_str: fixed_bps} — added AFTER cascade multiplication.
     """
     all_years = sorted(str(y) for y in _years())
     anchor_idx = all_years.index(anchor_year)
+    default_fml = "Uniform"
 
-    # Map each non-anchor year to its coefficient index
-    # Years BEFORE anchor get reverse-indexed: Y-1 uses coeffs[0], Y-2 uses coeffs[1], etc.
-    # Years AFTER anchor get forward-indexed: Y+1 uses coeffs[0], Y+2 uses coeffs[1], etc.
+    # Map each non-anchor year to its coefficient
     year_coeff_map: dict[str, float] = {}
     for i, ys in enumerate(all_years):
         if ys == anchor_year:
             continue
         distance = abs(i - anchor_idx)
-        ci = distance - 1  # coeffs[0]=Y±1, coeffs[1]=Y±2, …
+        ci = distance - 1
         year_coeff_map[ys] = coeffs[ci] if ci < len(coeffs) else 0.0
 
     specs: list[dict] = []
@@ -601,7 +613,7 @@ def _build_cascade_specs(
             year_configs[ys] = {
                 "mode": "annual",
                 "annual_cut": cut,
-                "formula_name": formula_name,
+                "formula_name": year_formulas.get(ys, default_fml),
             }
         specs.append(_spec_from_year_configs(seq, prefix, year_configs, base_sofr, base_effr))
     return specs
@@ -682,20 +694,19 @@ def render_bulk_generator(cm) -> None:
                 "<div style='color:#FF8C00;font-size:11px;letter-spacing:1px;"
                 "margin:10px 0 4px 0;'>CORRELATED CASCADE SETTINGS</div>"
                 "<small style='color:#666'>Sweep one anchor year. Other years "
-                "follow via spillover coefficients from historical Fed cycles."
+                "follow via spillover coefficients (negative = opposite direction)."
                 "</small>",
                 unsafe_allow_html=True,
             )
             years_list = _years()
-            cc1, cc2 = st.columns(2)
-            with cc1:
-                anchor_year = st.selectbox(
-                    "Anchor Year", years_list, index=0, key="casc_anchor",
-                )
-            with cc2:
-                casc_formula = st.selectbox(
-                    "Formula (all years)", formula_names, key="casc_formula",
-                )
+            all_ys = sorted(str(y) for y in years_list)
+
+            anchor_year = st.selectbox(
+                "Anchor Year", years_list, index=0, key="casc_anchor",
+            )
+            anchor_str = str(anchor_year)
+            anch_i = all_ys.index(anchor_str)
+
             cr1, cr2, cr3 = st.columns(3)
             with cr1:
                 casc_min = st.number_input(
@@ -732,46 +743,56 @@ def render_bulk_generator(cm) -> None:
             )
             if profile_sel != "Custom":
                 prof = CASCADE_PROFILES[profile_sel]
-                coeffs = prof["coeffs"][:]
+                base_coeffs = prof["coeffs"][:]
                 st.markdown(
                     f"<small style='color:#888;'>{prof['description']}</small>",
                     unsafe_allow_html=True,
                 )
             else:
-                coeffs = [0.5, 0.2, 0.0, 0.0]
+                base_coeffs = [0.5, 0.2, 0.0, 0.0]
 
-            # Editable coefficient sliders
+            # Per-year coefficients with actual year labels
             st.markdown(
                 "<div style='color:#FFB347;font-size:10px;letter-spacing:1px;"
-                "margin:10px 0 2px 0;'>SPILLOVER COEFFICIENTS</div>",
+                "margin:10px 0 2px 0;'>SPILLOVER COEFFICIENTS PER YEAR "
+                "<span style='color:#555;'>(negative = opposite direction)</span></div>",
                 unsafe_allow_html=True,
             )
-            sc1, sc2, sc3, sc4 = st.columns(4)
-            with sc1:
-                coeffs[0] = st.number_input(
-                    "Y±1", value=float(coeffs[0]), step=0.05,
-                    min_value=-2.0, max_value=2.0, format="%.2f", key="casc_c0",
-                )
-            with sc2:
-                coeffs[1] = st.number_input(
-                    "Y±2", value=float(coeffs[1]), step=0.05,
-                    min_value=-2.0, max_value=2.0, format="%.2f", key="casc_c1",
-                )
-            with sc3:
-                coeffs[2] = st.number_input(
-                    "Y±3", value=float(coeffs[2]), step=0.05,
-                    min_value=-2.0, max_value=2.0, format="%.2f", key="casc_c2",
-                )
-            with sc4:
-                coeffs[3] = st.number_input(
-                    "Y±4", value=float(coeffs[3]), step=0.05,
-                    min_value=-2.0, max_value=2.0, format="%.2f", key="casc_c3",
-                )
+            other_years = [ys for ys in all_ys if ys != anchor_str]
+            coeffs = base_coeffs[:]
+            coeff_cols = st.columns(len(other_years))
+            for ic, ys in enumerate(other_years):
+                dist = abs(all_ys.index(ys) - anch_i)
+                ci = dist - 1
+                default_c = base_coeffs[ci] if ci < len(base_coeffs) else 0.0
+                with coeff_cols[ic]:
+                    val = st.number_input(
+                        f"{ys}", value=float(default_c), step=0.05,
+                        min_value=-2.0, max_value=2.0, format="%.2f",
+                        key=f"casc_c_{ys}",
+                    )
+                    if ci < len(coeffs):
+                        coeffs[ci] = val
+
+            # Per-year formula selection
+            st.markdown(
+                "<div style='color:#4fc3f7;font-size:10px;letter-spacing:1px;"
+                "font-weight:700;margin:10px 0 2px 0;'>"
+                "📐 FORMULA PER YEAR</div>",
+                unsafe_allow_html=True,
+            )
+            casc_year_formulas: dict[str, str] = {}
+            fml_cols = st.columns(len(all_ys))
+            default_fml_idx = formula_names.index("Uniform") if "Uniform" in formula_names else 0
+            for ic, ys in enumerate(all_ys):
+                with fml_cols[ic]:
+                    f_sel = st.selectbox(
+                        ys, formula_names, index=default_fml_idx,
+                        key=f"casc_fml_{ys}",
+                    )
+                    casc_year_formulas[ys] = f_sel
 
             # Preview table
-            anchor_str = str(anchor_year)
-            all_ys = sorted(str(y) for y in years_list)
-            anch_i = all_ys.index(anchor_str)
             prev_html = (
                 "<div style='margin:10px 0;'>"
                 "<div style='color:#00B4D8;font-size:10px;letter-spacing:1px;"
@@ -787,7 +808,7 @@ def render_bulk_generator(cm) -> None:
                     f"border-bottom:1px solid #333;text-align:right;'>{ys}{tag}</th>"
                 )
             prev_html += "</tr></thead><tbody>"
-            for av in anchor_cuts[:5]:
+            for av in anchor_cuts[:6]:
                 prev_html += (
                     f"<tr><td style='color:#FFB347;padding:2px 6px;"
                     f"font-weight:700;'>{av:+.1f}bp</td>"
@@ -805,10 +826,10 @@ def render_bulk_generator(cm) -> None:
                         f"padding:2px 6px;'>{v:+.1f}</td>"
                     )
                 prev_html += "</tr>"
-            if len(anchor_cuts) > 5:
+            if len(anchor_cuts) > 6:
                 prev_html += (
                     f"<tr><td colspan='{len(all_ys)+1}' style='color:#555;"
-                    f"font-size:10px;padding:2px 6px;'>… {len(anchor_cuts)-5} more</td></tr>"
+                    f"font-size:10px;padding:2px 6px;'>… {len(anchor_cuts)-6} more</td></tr>"
                 )
             prev_html += "</tbody></table></div>"
             st.markdown(prev_html, unsafe_allow_html=True)
@@ -985,7 +1006,7 @@ def render_bulk_generator(cm) -> None:
             if gen_mode == "cascade":
                 specs = _build_cascade_specs(
                     prefix, str(anchor_year), anchor_cuts, coeffs,
-                    casc_formula, casc_offsets, sofr, effr,
+                    casc_year_formulas, casc_offsets, sofr, effr,
                 )
             else:
                 specs = _build_bulk_specs(prefix, per_year, sofr, effr, gen_mode)
