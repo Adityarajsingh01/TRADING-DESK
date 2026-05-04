@@ -574,7 +574,7 @@ def _build_cascade_specs(
     anchor_year: str,
     anchor_cuts: list[float],
     coeffs: list[float],
-    year_formulas: dict[str, str],
+    year_formulas: dict[str, list[str]],
     offsets: dict[str, float],
     base_sofr: float,
     base_effr: float,
@@ -585,12 +585,13 @@ def _build_cascade_specs(
 
     coeffs:        [Y+1, Y+2, Y+3, Y+4] — multiplier of anchor cut.
                    Negative = opposite direction (cuts become hikes).
-    year_formulas: {year_str: formula_name} — per-year distribution formula.
+    year_formulas: {year_str: [formula_names]} — per-year formula list.
     offsets:       {year_str: fixed_bps} — added AFTER cascade multiplication.
     """
+    from itertools import product as iterproduct
+
     all_years = sorted(str(y) for y in _years())
     anchor_idx = all_years.index(anchor_year)
-    default_fml = "Uniform"
 
     # Map each non-anchor year to its coefficient
     year_coeff_map: dict[str, float] = {}
@@ -601,21 +602,28 @@ def _build_cascade_specs(
         ci = distance - 1
         year_coeff_map[ys] = coeffs[ci] if ci < len(coeffs) else 0.0
 
+    # Build formula combos: Cartesian product of per-year formula lists
+    fml_lists = [year_formulas.get(ys, ["Uniform"]) for ys in all_years]
+    fml_combos = list(iterproduct(*fml_lists))
+
     specs: list[dict] = []
-    for seq, anchor_bps in enumerate(anchor_cuts, start=1):
-        year_configs = {}
-        for ys in all_years:
-            if ys == anchor_year:
-                cut = float(anchor_bps)
-            else:
-                c = year_coeff_map.get(ys, 0.0)
-                cut = round(float(anchor_bps) * c + offsets.get(ys, 0.0), 2)
-            year_configs[ys] = {
-                "mode": "annual",
-                "annual_cut": cut,
-                "formula_name": year_formulas.get(ys, default_fml),
-            }
-        specs.append(_spec_from_year_configs(seq, prefix, year_configs, base_sofr, base_effr))
+    seq = 0
+    for anchor_bps in anchor_cuts:
+        for fml_combo in fml_combos:
+            seq += 1
+            year_configs = {}
+            for idx, ys in enumerate(all_years):
+                if ys == anchor_year:
+                    cut = float(anchor_bps)
+                else:
+                    c = year_coeff_map.get(ys, 0.0)
+                    cut = round(float(anchor_bps) * c + offsets.get(ys, 0.0), 2)
+                year_configs[ys] = {
+                    "mode": "annual",
+                    "annual_cut": cut,
+                    "formula_name": fml_combo[idx],
+                }
+            specs.append(_spec_from_year_configs(seq, prefix, year_configs, base_sofr, base_effr))
     return specs
 
 
@@ -774,65 +782,25 @@ def render_bulk_generator(cm) -> None:
                     if ci < len(coeffs):
                         coeffs[ci] = val
 
-            # Per-year formula selection
+            # Per-year formula selection (multi-select)
             st.markdown(
                 "<div style='color:#4fc3f7;font-size:10px;letter-spacing:1px;"
                 "font-weight:700;margin:10px 0 2px 0;'>"
-                "📐 FORMULA PER YEAR</div>",
+                "📐 FORMULAS PER YEAR "
+                "<span style='color:#555;font-weight:400;'>"
+                "(pick multiple — cases multiply)</span></div>",
                 unsafe_allow_html=True,
             )
-            casc_year_formulas: dict[str, str] = {}
+            casc_year_formulas: dict[str, list[str]] = {}
+            default_fml = ["Uniform"] if "Uniform" in formula_names else formula_names[:1]
             fml_cols = st.columns(len(all_ys))
-            default_fml_idx = formula_names.index("Uniform") if "Uniform" in formula_names else 0
             for ic, ys in enumerate(all_ys):
                 with fml_cols[ic]:
-                    f_sel = st.selectbox(
-                        ys, formula_names, index=default_fml_idx,
+                    f_sel = st.multiselect(
+                        ys, formula_names, default=default_fml,
                         key=f"casc_fml_{ys}",
                     )
-                    casc_year_formulas[ys] = f_sel
-
-            # Preview table
-            prev_html = (
-                "<div style='margin:10px 0;'>"
-                "<div style='color:#00B4D8;font-size:10px;letter-spacing:1px;"
-                "margin-bottom:4px;'>CASCADE PREVIEW</div>"
-                "<table style='width:100%;border-collapse:collapse;font-size:11px;'>"
-                "<thead><tr><th style='color:#FF6600;padding:3px 6px;"
-                "border-bottom:1px solid #333;text-align:left;'>Anchor</th>"
-            )
-            for ys in all_ys:
-                tag = " ⚓" if ys == anchor_str else ""
-                prev_html += (
-                    f"<th style='color:#FF6600;padding:3px 6px;"
-                    f"border-bottom:1px solid #333;text-align:right;'>{ys}{tag}</th>"
-                )
-            prev_html += "</tr></thead><tbody>"
-            for av in anchor_cuts[:6]:
-                prev_html += (
-                    f"<tr><td style='color:#FFB347;padding:2px 6px;"
-                    f"font-weight:700;'>{av:+.1f}bp</td>"
-                )
-                for i_y, ys in enumerate(all_ys):
-                    if ys == anchor_str:
-                        v = av
-                    else:
-                        ci = abs(i_y - anch_i) - 1
-                        c = coeffs[ci] if ci < len(coeffs) else 0.0
-                        v = round(av * c, 2)
-                    clr = "#00FF41" if v < 0 else ("#FF3131" if v > 0 else "#555")
-                    prev_html += (
-                        f"<td style='color:{clr};text-align:right;"
-                        f"padding:2px 6px;'>{v:+.1f}</td>"
-                    )
-                prev_html += "</tr>"
-            if len(anchor_cuts) > 6:
-                prev_html += (
-                    f"<tr><td colspan='{len(all_ys)+1}' style='color:#555;"
-                    f"font-size:10px;padding:2px 6px;'>… {len(anchor_cuts)-6} more</td></tr>"
-                )
-            prev_html += "</tbody></table></div>"
-            st.markdown(prev_html, unsafe_allow_html=True)
+                    casc_year_formulas[ys] = f_sel if f_sel else default_fml
 
             # Per-year offsets
             with st.expander("🔧 Per-year offsets (optional bias)", expanded=False):
@@ -852,8 +820,15 @@ def render_bulk_generator(cm) -> None:
                         if ov != 0:
                             casc_offsets[str(y)] = ov
 
-            total = len(anchor_cuts)
-            math_str = f"{total} anchor steps"
+            # Total: anchor steps × formula combos
+            fml_combo_count = 1
+            for ys in all_ys:
+                fml_combo_count *= len(casc_year_formulas.get(ys, ["Uniform"]))
+            total = len(anchor_cuts) * fml_combo_count
+            if fml_combo_count > 1:
+                math_str = f"{len(anchor_cuts)} steps × {fml_combo_count} formula combos = {total:,}"
+            else:
+                math_str = f"{total} anchor steps"
 
         # ==================================================================
         # CARTESIAN / ADDITIVE UI  (original)
