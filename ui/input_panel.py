@@ -499,6 +499,7 @@ def _build_bulk_specs(
     base_sofr: float,
     base_effr: float,
     mode: str = "cartesian",
+    smart_filter: bool = True,
 ) -> list[dict]:
     """
     Two generation modes:
@@ -540,6 +541,14 @@ def _build_bulk_specs(
             for (cut_bps, fml) in vary_opts:
                 if cut_bps == 0:
                     continue  # already covered by baseline
+                
+                if smart_filter:
+                    f_name = fml.lower()
+                    if cut_bps < 0 and "hike" in f_name and "cut" not in f_name:
+                        continue
+                    if cut_bps > 0 and "cut" in f_name and "hike" not in f_name:
+                        continue
+
                 year_configs = {
                     ys: dict(baseline[ys])  # copy each year as 0-cut stub
                     for ys, _ in year_opts
@@ -557,15 +566,26 @@ def _build_bulk_specs(
 
     # ── default: cartesian ───────────────────────────────────────────────
     for combo in itertools.product(*[o for _, o in year_opts]):
-        seq += 1
         year_configs = {}
+        valid_combo = True
         for (year_str, _), (cut_bps, fml) in zip(year_opts, combo):
+            if smart_filter:
+                f_name = fml.lower()
+                if cut_bps < 0 and "hike" in f_name and "cut" not in f_name:
+                    valid_combo = False
+                    break
+                if cut_bps > 0 and "cut" in f_name and "hike" not in f_name:
+                    valid_combo = False
+                    break
+
             year_configs[year_str] = {
                 "mode":         "annual",
                 "annual_cut":   float(cut_bps),
                 "formula_name": fml,
             }
-        specs.append(_spec_from_year_configs(seq, prefix, year_configs, base_sofr, base_effr))
+        if valid_combo:
+            seq += 1
+            specs.append(_spec_from_year_configs(seq, prefix, year_configs, base_sofr, base_effr))
     return specs
 
 
@@ -578,6 +598,7 @@ def _build_cascade_specs(
     offsets: dict[str, float],
     base_sofr: float,
     base_effr: float,
+    smart_filter: bool = True,
 ) -> list[dict]:
     """
     Correlated Cascade: sweep anchor year from min→max, propagate to other
@@ -610,20 +631,32 @@ def _build_cascade_specs(
     seq = 0
     for anchor_bps in anchor_cuts:
         for fml_combo in fml_combos:
-            seq += 1
             year_configs = {}
+            valid_combo = True
             for idx, ys in enumerate(all_years):
                 if ys == anchor_year:
                     cut = float(anchor_bps)
                 else:
                     c = year_coeff_map.get(ys, 0.0)
                     cut = round(float(anchor_bps) * c + offsets.get(ys, 0.0), 2)
+                
+                if smart_filter:
+                    f_name = fml_combo[idx].lower()
+                    if cut < 0 and "hike" in f_name and "cut" not in f_name:
+                        valid_combo = False
+                        break
+                    if cut > 0 and "cut" in f_name and "hike" not in f_name:
+                        valid_combo = False
+                        break
+
                 year_configs[ys] = {
                     "mode": "annual",
                     "annual_cut": cut,
                     "formula_name": fml_combo[idx],
                 }
-            specs.append(_spec_from_year_configs(seq, prefix, year_configs, base_sofr, base_effr))
+            if valid_combo:
+                seq += 1
+                specs.append(_spec_from_year_configs(seq, prefix, year_configs, base_sofr, base_effr))
     return specs
 
 
@@ -709,8 +742,36 @@ def render_bulk_generator(cm) -> None:
             years_list = _years()
             all_ys = sorted(str(y) for y in years_list)
 
+            if "custom_profiles" not in st.session_state:
+                st.session_state.custom_profiles = {}
+            if "deleted_profiles" not in st.session_state:
+                st.session_state.deleted_profiles = []
+                
+            combined_profiles = {k: v for k, v in CASCADE_PROFILES.items() if k not in st.session_state.deleted_profiles}
+            combined_profiles.update(st.session_state.custom_profiles)
+
+            def _apply_profile():
+                prof = st.session_state.casc_profile
+                anch = str(st.session_state.casc_anchor)
+                all_y = sorted(str(y) for y in _years())
+                anch_idx = all_y.index(anch)
+                if prof in combined_profiles:
+                    cfs = combined_profiles[prof]["coeffs"]
+                    for ys in all_y:
+                        if ys != anch:
+                            ci = abs(all_y.index(ys) - anch_idx) - 1
+                            val = float(cfs[ci]) if ci < len(cfs) else 0.0
+                            st.session_state[f"casc_c_{ys}"] = val
+            
+            # Init keys to avoid error on first run
+            if "casc_anchor" not in st.session_state:
+                st.session_state.casc_anchor = years_list[0]
+            if "casc_profile" not in st.session_state:
+                st.session_state.casc_profile = "Momentum"
+                _apply_profile()
+
             anchor_year = st.selectbox(
-                "Anchor Year", years_list, index=0, key="casc_anchor",
+                "Anchor Year", years_list, key="casc_anchor", on_change=_apply_profile
             )
             anchor_str = str(anchor_year)
             anch_i = all_ys.index(anchor_str)
@@ -737,20 +798,27 @@ def render_bulk_generator(cm) -> None:
             st.markdown(
                 "<div style='color:#00B4D8;font-size:11px;letter-spacing:1px;"
                 "font-weight:700;margin:12px 0 4px 0;'>"
-                "📊 SPILLOVER PROFILE  (from 2015-2025 Fed history)</div>",
+                "📊 SPILLOVER PROFILE</div>",
                 unsafe_allow_html=True,
             )
-            profile_names = list(CASCADE_PROFILES.keys()) + ["Custom"]
+            profile_names = list(combined_profiles.keys()) + ["Custom"]
+            
+            if "_pending_casc_profile" in st.session_state:
+                st.session_state.casc_profile = st.session_state._pending_casc_profile
+                del st.session_state._pending_casc_profile
+                
             profile_sel = st.selectbox(
-                "Profile", profile_names, key="casc_profile",
+                "Profile", profile_names, key="casc_profile", on_change=_apply_profile,
                 format_func=lambda n: (
-                    f"{CASCADE_PROFILES[n]['icon']} {n}"
-                    if n in CASCADE_PROFILES
+                    f"{combined_profiles[n].get('icon', '📌')} {n}"
+                    if n in combined_profiles
                     else "✏️ Custom"
                 ),
             )
             if profile_sel != "Custom":
-                prof = CASCADE_PROFILES[profile_sel]
+                prof = combined_profiles.get(profile_sel)
+                if not prof:
+                    prof = {"description": "Profile not found.", "coeffs": [0.0, 0.0, 0.0, 0.0]}
                 base_coeffs = prof["coeffs"][:]
                 st.markdown(
                     f"<small style='color:#888;'>{prof['description']}</small>",
@@ -773,14 +841,111 @@ def render_bulk_generator(cm) -> None:
                 dist = abs(all_ys.index(ys) - anch_i)
                 ci = dist - 1
                 default_c = base_coeffs[ci] if ci < len(base_coeffs) else 0.0
+                if f"casc_c_{ys}" not in st.session_state:
+                    st.session_state[f"casc_c_{ys}"] = float(default_c)
+
                 with coeff_cols[ic]:
                     val = st.number_input(
-                        f"{ys}", value=float(default_c), step=0.05,
+                        f"{ys}", step=0.05,
                         min_value=-2.0, max_value=2.0, format="%.2f",
                         key=f"casc_c_{ys}",
                     )
                     if ci < len(coeffs):
                         coeffs[ci] = val
+            
+            with st.expander("💾 Manage Current Profile (Save / Update / Delete)", expanded=False):
+                st.markdown("<small style='color:#888;'>Save your current coefficients as a new profile, or manage existing profiles.</small>", unsafe_allow_html=True)
+                c1, c2, c3 = st.columns([2, 1, 1])
+                with c1:
+                    new_prof_name = st.text_input("Profile Name", placeholder="e.g. Bear Flattening", label_visibility="collapsed", key="new_prof_name_input")
+                with c2:
+                    if st.button("Save as New", use_container_width=True, key="save_prof_btn"):
+                        if new_prof_name and new_prof_name not in combined_profiles:
+                            st.session_state.custom_profiles[new_prof_name] = {
+                                "description": "Custom user profile.",
+                                "coeffs": coeffs[:],
+                                "icon": "📌"
+                            }
+                            st.session_state._pending_casc_profile = new_prof_name
+                            st.rerun()
+                with c3:
+                    is_deletable = profile_sel != "Custom"
+                    if st.button("Delete Current", use_container_width=True, disabled=not is_deletable, key="del_prof_btn"):
+                        if profile_sel in st.session_state.custom_profiles:
+                            del st.session_state.custom_profiles[profile_sel]
+                        elif profile_sel in CASCADE_PROFILES:
+                            st.session_state.deleted_profiles.append(profile_sel)
+                        # Calculate fallback profile dynamically
+                        valid_builtins = [k for k in CASCADE_PROFILES.keys() if k not in st.session_state.deleted_profiles]
+                        if valid_builtins:
+                            fallback = valid_builtins[0]
+                        elif st.session_state.custom_profiles:
+                            fallback = list(st.session_state.custom_profiles.keys())[0]
+                        else:
+                            fallback = "Custom"
+                            
+                        st.session_state._pending_casc_profile = fallback
+                        st.rerun()
+                
+                is_custom = profile_sel in st.session_state.custom_profiles
+                if is_custom:
+                    if st.button(f"Update '{profile_sel}' with current inputs", use_container_width=True):
+                        st.session_state.custom_profiles[profile_sel]["coeffs"] = coeffs[:]
+                        st.success("Profile updated!")
+                        st.rerun()
+                elif st.session_state.deleted_profiles:
+                    if st.button("🔄 Restore Deleted Built-in Profiles", use_container_width=True):
+                        st.session_state.deleted_profiles = []
+                        st.rerun()
+
+            with st.expander("📐 Calculate Profile from Sample Rates", expanded=False):
+                st.markdown(
+                    "<small style='color:#888;'>Enter the absolute bps cuts/hikes you expect for each year. "
+                    "The tool will automatically calculate the relative spillover coefficients based on your "
+                    f"selected Anchor Year (<b>{anchor_str}</b>).</small>", 
+                    unsafe_allow_html=True
+                )
+                samp_cols = st.columns(len(all_ys))
+                samp_vals = {}
+                for ic, ys in enumerate(all_ys):
+                    with samp_cols[ic]:
+                        dist_pre = abs(all_ys.index(ys) - anch_i)
+                        ci_pre = dist_pre - 1
+                        def_c = -100.0 if ys == anchor_str else round(-100.0 * (coeffs[ci_pre] if ci_pre < len(coeffs) else 0.0), 2)
+                        samp_vals[ys] = st.number_input(ys, value=def_c, step=12.5, format="%.1f", key=f"samp_calc_{ys}")
+                
+                cc1, cc2 = st.columns([3, 1])
+                with cc1:
+                    calc_name = st.text_input("New Profile Name", placeholder="e.g. Calculated Scenario", label_visibility="collapsed", key="calc_name_input")
+                with cc2:
+                    if st.button("Calculate & Save", use_container_width=True, key="calc_save_btn"):
+                        if calc_name and calc_name not in combined_profiles:
+                            anch_val = samp_vals[anchor_str]
+                            if anch_val == 0:
+                                st.error("Anchor year must be non-zero to calculate spillover ratios.")
+                            else:
+                                new_cfs = [0.0, 0.0, 0.0, 0.0]
+                                counts = [0, 0, 0, 0]
+                                for ys in all_ys:
+                                    if ys != anchor_str:
+                                        dist = abs(all_ys.index(ys) - anch_i)
+                                        ci = dist - 1
+                                        if ci < len(new_cfs):
+                                            coeff = samp_vals[ys] / anch_val
+                                            new_cfs[ci] += coeff
+                                            counts[ci] += 1
+                                
+                                for i in range(4):
+                                    if counts[i] > 0:
+                                        new_cfs[i] = round(new_cfs[i] / counts[i], 2)
+                                
+                                st.session_state.custom_profiles[calc_name] = {
+                                    "description": f"Auto-calculated profile anchored to {anchor_str}.",
+                                    "coeffs": new_cfs,
+                                    "icon": "📐"
+                                }
+                                st.session_state._pending_casc_profile = calc_name
+                                st.rerun()
 
             # Per-year formula selection (multi-select)
             st.markdown(
@@ -829,6 +994,38 @@ def render_bulk_generator(cm) -> None:
                 math_str = f"{len(anchor_cuts)} steps × {fml_combo_count} formula combos = {total:,}"
             else:
                 math_str = f"{total} anchor steps"
+
+            # Live Sample Preview
+            st.markdown(
+                "<div style='color:#00FF41;font-size:11px;letter-spacing:1px;"
+                "font-weight:700;margin:16px 0 4px 0;'>LIVE SAMPLES (Based on your Anchor Range)</div>",
+                unsafe_allow_html=True,
+            )
+            sample_anchors = anchor_cuts[:3] if anchor_cuts else [-100.0, -50.0, 0.0]
+            for s_anch in sample_anchors:
+                sample_cuts = []
+                for ys in all_ys:
+                    if ys == anchor_str:
+                        c = float(s_anch)
+                    else:
+                        dist = abs(all_ys.index(ys) - anch_i)
+                        ci = dist - 1
+                        coeff = coeffs[ci] if ci < len(coeffs) else 0.0
+                        c = round(float(s_anch) * coeff + casc_offsets.get(ys, 0.0), 2)
+                    
+                    color = "#00FF41" if c < 0 else ("#FF3131" if c > 0 else "#888")
+                    sample_cuts.append(
+                        f"<span style='color:#C0C0C0;'>{ys}:</span> "
+                        f"<span style='color:{color};font-weight:700;'>{c:+.1f}bp</span>"
+                    )
+                
+                st.markdown(
+                    f"<div style='background:#111;border:1px solid #333;padding:4px 8px;border-radius:4px;font-size:12px;margin-bottom:4px;'>"
+                    f"<span style='color:#FF8C00;font-size:11px;width:95px;display:inline-block;'>"
+                    f"Anchor <b style='color:#fff;'>{s_anch:+.1f}</b></span> │ "
+                    f"{' &nbsp;│&nbsp; '.join(sample_cuts)}</div>",
+                    unsafe_allow_html=True,
+                )
 
         # ==================================================================
         # CARTESIAN / ADDITIVE UI  (original)
@@ -953,10 +1150,18 @@ def render_bulk_generator(cm) -> None:
             f"</div>",
             unsafe_allow_html=True,
         )
+
+        st.markdown("<hr style='border-color:#222;margin:10px 0;'>", unsafe_allow_html=True)
+        smart_filter = st.checkbox(
+            "🧠 Smart Formula Filtering (Recommended)",
+            value=True,
+            help="Automatically skips combinations where a formula named 'Hike' is applied to a cut, or 'Cut' is applied to a hike."
+        )
+
         st.markdown(
             f"<div style='border-top:1px solid #333;padding-top:8px;margin-top:10px;'>"
             f"<span style='color:#888;font-size:11px;letter-spacing:1px;'>"
-            f"ESTIMATED TOTAL CASES: </span>"
+            f"ESTIMATED TOTAL CASES (pre-filter): </span>"
             f"<span style='color:{color};font-size:16px;font-weight:700;'>{total:,}</span>"
             f"<span style='color:{color};font-size:10px;'>{warn}</span></div>",
             unsafe_allow_html=True,
@@ -982,9 +1187,12 @@ def render_bulk_generator(cm) -> None:
                 specs = _build_cascade_specs(
                     prefix, str(anchor_year), anchor_cuts, coeffs,
                     casc_year_formulas, casc_offsets, sofr, effr,
+                    smart_filter=smart_filter,
                 )
             else:
-                specs = _build_bulk_specs(prefix, per_year, sofr, effr, gen_mode)
+                specs = _build_bulk_specs(
+                    prefix, per_year, sofr, effr, gen_mode, smart_filter=smart_filter
+                )
 
             if preview:
                 sample_n = min(8, len(specs))
